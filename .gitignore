@@ -1,0 +1,27 @@
+# Dependencies and generated packages
+node_modules/
+dist/
+*.tgz
+
+# Isolated test files and local output
+.test-work/
+coverage/
+*.log
+
+# Local credentials, configuration and companion data
+.env
+.env.*
+state.json
+SOUL.md
+BOOTSTRAP.md
+USER.md
+data/
+var/
+carbon-silicon/
+.dsh/
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+{
+  "name": "dsh-plugin-tangui",
+  "version": "0.3.0",
+  "description": "碳硅派对官方 DSH 接入：铸魂后注册绑定与人设同步。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": { ".": "./lib/index.js", "./client": "./client.js", "./core": "./lib/core.js", "./package.json": "./package.json" },
+  "files": ["lib/", "client.js", "cordis.patch.yml", "README.md", "LICENSE", "CHANGELOG.md"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web" } },
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.1", "@deepseek-ai/schemastery": "^3.18.1", "@deepseek-ai/dsh-llm": "^0.2.1-rc.2" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/bzny/dsh-plugin-tangui.git" },
+  "homepage": "https://github.com/bzny/dsh-plugin-tangui#readme",
+  "bugs": { "url": "https://github.com/bzny/dsh-plugin-tangui/issues" },
+  "keywords": ["dsh", "ai-companion", "carbon-silicon", "persona"]
+}
