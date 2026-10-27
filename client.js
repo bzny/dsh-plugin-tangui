@@ -21,6 +21,7 @@ window.__ModuleLoader__.load({
       const [edited, setEdited] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
+      const [notice, setNotice] = React.useState('');
       const dirty = React.useRef(false);
       const descriptionDirty = React.useRef(false);
       const mounted = React.useRef(true);
@@ -62,7 +63,7 @@ window.__ModuleLoader__.load({
       }, []);
       const edit = (update) => { dirty.current = true; setEdited(true); setForm((old) => update(old)); };
       const action = async (payload) => {
-        setBusy(true); setError('');
+        setBusy(true); setError(''); setNotice('');
         try {
           const response = await fetch(ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tangui-client': '1' }, body: JSON.stringify(payload) });
           const data = await response.json();
@@ -71,9 +72,15 @@ window.__ModuleLoader__.load({
             throw new Error(data.error?.message || '操作没有完成。');
           }
           const submittedEdits = payload.action === 'prepare' || (payload.action === 'sync' && payload.fresh && payload.draft)
-            || (payload.action === 'configure' && payload.enabled === true) || payload.action === 'reconnect';
+            || (payload.action === 'configure' && payload.enabled === true);
           if (submittedEdits) { dirty.current = false; descriptionDirty.current = false; setEdited(false); }
           assign(data);
+          if (payload.action === 'reconnect') {
+            // Reconnecting only submits the destination. Keep unsaved persona
+            // edits so changing community cannot silently restore full SOUL.
+            setForm((old) => ({ ...old, platformUrl: data.platformUrl }));
+            setNotice('已切换，等待连接。请核对人设，再确认接入。');
+          }
         } catch (reason) { setError(reason.message); }
         finally { setBusy(false); }
       };
@@ -86,13 +93,16 @@ window.__ModuleLoader__.load({
         ...(form.memoryDir === state.memoryDir && descriptionDirty.current ? { description: form.draft.description } : {}) };
       const normalization = state.normalization || { status: 'unprepared' };
       const normalizationLabel = { unprepared: '尚未由 AI 整理', running: 'AI 正在整理，请稍候…', ready: 'AI 已整理', error: 'AI 整理未完成' }[normalization.status] || '等待整理';
+      const supportsConnectionSwitch = state.capabilities?.connectionSwitch === true;
       return h('section', { style: box },
         h('h2', null, '碳硅派对 · 伙伴接入'),
-        h('p', null, '让 DSH 已配置的 AI 把铸魂后的人设整理成平台格式，再注册或绑定伙伴。首次批准连接后自动导入；已有绑定会继续保留。'),
+        h('p', null, '让 DSH 已配置的 AI 把铸魂后的人设整理成平台格式，再注册或绑定伙伴。普通插件升级沿用现有连接，无需重新绑定；更换社区时使用下方“更换社区 / 重新配对”。'),
         h('p', null, h('strong', null, phases[state.status] || state.status), ' · ', state.sourceReason || ''),
         (error || state.error?.message) && h('p', { role: 'alert', style: { color: '#d54949' } }, error || state.error.message),
+        notice && h('p', { role: 'status' }, notice),
         state.warning && h('p', { role: 'status' }, state.warning),
         field('社区地址', form.platformUrl, (value) => edit((old) => ({ ...old, platformUrl: value }))),
+        !supportsConnectionSwitch && h('p', { role: 'status' }, 'DSH 服务尚未加载本次插件更新，请结束当前任务后通过原有启动器重新启动 DSH，再更换社区。仅刷新页面不会更新服务程序。'),
         field('长期记忆目录（自动识别，也可调整）', form.memoryDir, (value) => edit((old) => ({ ...old, memoryDir: value }))),
         state.memoryDiscovery?.status === 'needs_selection' && h('p', { role: 'status' }, '发现多个记忆目录，请明确选择要接入的伙伴：',
           ...(state.memoryDiscovery.candidates || []).map((item) => h('button', { key: item.path, type: 'button', style: buttonStyle, disabled: busy || !!state.binding,
@@ -131,9 +141,12 @@ window.__ModuleLoader__.load({
         state.binding && button(state.pendingImport ? '重试原同步请求' : '检查绑定状态', () => action({ action: 'sync' })),
         state.binding && button('确认以上内容，更新平台人设', () => action({ action: 'sync', fresh: true, draft: form.draft }), !state.sourceComplete || state.pendingUncertain || normalization.status !== 'ready'),
         state.enabled && !state.binding && !state.pairing && button('重试整理与连接', () => action({ action: 'configure', ...sourceInput, enabled: true })),
-        (state.status === 'reconnect_required' || state.binding) && button('重新配对（旧授权请在平台撤销）', () => {
-          if (window.confirm('将清除本插件的本地绑定并重新配对。旧授权不会自动撤销，请在平台管理页撤销旧授权。继续吗？')) void action({ action: 'reconnect' });
-        }),
+        (state.platformUrl || form.platformUrl) && button('更换社区 / 重新配对', () => {
+          const target = form.platformUrl.trim() || state.platformUrl;
+          if (window.confirm(`更换社区 / 重新配对：\n${state.platformUrl || '尚未设置'} → ${target}\n\n将停止旧的本机连接，保留社区账号、人设和页面中尚未提交的编辑。旧平台授权仍需在原平台撤销。\n\n这一步不会立即连接任一平台，之后请核对人设并确认接入。继续吗？`)) {
+            void action({ action: 'reconnect', platformUrl: target });
+          }
+        }, !supportsConnectionSwitch || state.pendingUncertain),
         edited && h('p', null, '有尚未提交的修改。'),
         h('p', { style: { fontSize: '14px' } }, '仅首次接入会自动同步；后续人设变化由你确认更新。若其他程序占用 AI 控制权，本插件会等待你结束该程序后重试，不会抢占。授权仅保存在本机插件状态文件，不显示给网页。'));
     }
