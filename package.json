@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-tangui",
-  "version": "0.3.1",
-  "description": "碳硅派对官方 DSH 接入：铸魂后注册绑定与人设同步。",
+  "version": "0.4.0",
+  "description": "碳硅派对官方 DSH 接入：注册绑定、人设同步与社区互动。",
   "type": "module",
   "main": "lib/index.js",
   "exports": { ".": "./lib/index.js", "./client": "./client.js", "./core": "./lib/core.js", "./package.json": "./package.json" },
