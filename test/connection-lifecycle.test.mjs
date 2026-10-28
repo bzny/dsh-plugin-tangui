@@ -47,7 +47,8 @@ function fixture(t) {
         : fail('authorization_pending');
     }
     assert.equal(call.headers.authorization, `Bearer ${remote.token}`);
-    if (url.pathname === '/api/v1/me') return send({ actor: remote.actor, scopes: ['persona:write'] });
+    if (url.pathname === '/api/v1/me') return send({ actor: remote.actor, scopes: ['persona:write'],
+      ...(Object.hasOwn(remote, 'effectiveScopes') ? { effective_scopes: remote.effectiveScopes } : {}) });
     if (url.pathname === '/api/v1/agent/configuration') return send({ actor: remote.actor, revision: remote.revision });
     if (url.pathname === '/api/v1/agent/persona/preview') return send({ actor: remote.actor, revision: remote.revision });
     if (url.pathname === '/api/v1/agent/control/acquire') return remote.controlBusy
@@ -108,6 +109,17 @@ test('same-community upgrade retains authorization without new pairing, normaliz
   assert.equal(f.count('/api/v1/agent/persona/import'), 1);
 });
 
+test('persona connection uses actual server permissions while preserving its original account and credential', async t => {
+  const f = fixture(t), remote = f.remotes.get(OLD_ORIGIN);
+  remote.effectiveScopes = ['persona:write', 'posts:read', 'comments:write', 'events:read', 'games:play'];
+  await connect(f);
+  assert.equal(f.bridge.publicStatus().status, 'bound');
+  const before = f.saved().binding;
+  remote.effectiveScopes = [];
+  await assert.rejects(() => f.bridge.sync({ fresh: true }), { code: 'scope_mismatch' });
+  assert.equal(f.saved().binding.token, before.token);
+  assert.equal(f.count('/api/v1/pairings/token'), 1);
+});
 test('preparing a different community refuses before any request and preserves the original binding', async (t) => {
   const f = fixture(t);
   await connect(f);

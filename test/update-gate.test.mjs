@@ -55,4 +55,3 @@ test('all three tools share the update gate including persona prepare and activi
   for (const name of registrations.keys()) await registrations.get(name).execute({ action: 'status' }, exec);
   assert.equal(calls, 0); release();
 });
-

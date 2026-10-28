@@ -48,4 +48,3 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
   assert.equal((await request({ action: 'update_hold', clientId: '../x', editing: true })).status, 400);
   assert.equal((await request({ action: 'discover' })).status, 200);
 });
-

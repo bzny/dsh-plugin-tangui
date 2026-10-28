@@ -14,6 +14,134 @@ window.__ModuleLoader__.load({
       border: '1px solid var(--dsw-alias-border-l2, #aaa)', background: 'var(--dsw-alias-bg-layer-1, transparent)', color: 'inherit', font: 'inherit' };
     const buttonStyle = { padding: '9px 15px', marginRight: '8px', marginBottom: '8px', borderRadius: '8px', cursor: 'pointer', font: 'inherit',
       border: '1px solid var(--dsw-alias-border-l2, #888)', color: 'inherit', background: 'var(--dsw-alias-bg-layer-2, transparent)' };
+    let openManagementSession = () => false;
+    const CARD_VISIBILITY_KEY = 'tangui-management-card-visible';
+    const visibilityListeners = new Set();
+    const readCardVisibility = () => {
+      try { return localStorage.getItem(CARD_VISIBILITY_KEY) !== 'off'; }
+      catch { return true; }
+    };
+    function useCardVisibility() {
+      const [visible, setVisible] = React.useState(readCardVisibility);
+      React.useEffect(() => {
+        const refresh = () => setVisible(readCardVisibility());
+        const onStorage = event => { if (event.key === CARD_VISIBILITY_KEY || event.key === null) refresh(); };
+        visibilityListeners.add(refresh);
+        window.addEventListener?.('storage', onStorage);
+        return () => { visibilityListeners.delete(refresh); window.removeEventListener?.('storage', onStorage); };
+      }, []);
+      return visible;
+    }
+    function setCardVisibility(visible) {
+      localStorage.setItem(CARD_VISIBILITY_KEY, visible ? 'on' : 'off');
+      for (const notify of visibilityListeners) notify();
+    }
+
+    const SESSION_STATUS_CSS = '.tangui-session-status{--tangui-blue:#1769aa;--tangui-green:#237a46;--tangui-orange:#925400;--tangui-red:#bd3030;--tangui-gray:#687482}.tangui-status-blue{color:var(--tangui-blue)}.tangui-status-green{color:var(--tangui-green)}.tangui-status-orange{color:var(--tangui-orange)}.tangui-status-red{color:var(--tangui-red)}.tangui-status-gray{color:var(--tangui-gray)}@media(prefers-color-scheme:dark){.tangui-session-status{--tangui-blue:#73b9f2;--tangui-green:#75cf96;--tangui-orange:#efb15e;--tangui-red:#ff8b8b;--tangui-gray:#a5afba}}html[data-ds-theme-source="light"] .tangui-session-status,[data-theme="light"] .tangui-session-status,.light .tangui-session-status{--tangui-blue:#1769aa;--tangui-green:#237a46;--tangui-orange:#925400;--tangui-red:#bd3030;--tangui-gray:#687482}body[data-ds-dark-theme] .tangui-session-status,[data-theme="dark"] .tangui-session-status,.dark .tangui-session-status{--tangui-blue:#73b9f2;--tangui-green:#75cf96;--tangui-orange:#efb15e;--tangui-red:#ff8b8b;--tangui-gray:#a5afba}';
+
+    function activitySummary(state) {
+      const entry = state.modelLogs?.at(-1);
+      const runtime = state.runtime || {};
+      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记' }[entry?.purpose] || '模型调用';
+      const stage = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '模型调用失败', cancelled: '调用已停止', timed_out: '模型等待超时' }[entry?.phase] || '处理中';
+      const stageTone = { waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' }[entry?.phase] || 'blue';
+      const outcome = [runtime.last_model_call, state.lastGameModelCall].find(row => row?.call_id === entry?.call_id);
+      let result = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' }[outcome?.status];
+      let resultTone = { generating: 'blue', model_started: 'blue', model_failed: 'red', declined: 'gray', pending: 'orange', submitted: 'green', accepted: 'green', discarded: 'gray', discarded_late: 'gray', rejected: 'red' }[outcome?.status];
+      if (outcome?.status === 'submitted' && runtime.last_submission?.call_id === entry?.call_id) {
+        result = runtime.last_submission.status === 'queued' ? '已排队，尚未展示' : runtime.last_submission.status === 'published' ? '已公开发表' : '服务已接收';
+        resultTone = runtime.last_submission.status === 'queued' ? 'orange' : 'green';
+      }
+      const error = runtime.error?.message || state.runtimeConnection?.error?.message || state.error?.message || state.runtimeInitializationError || '';
+      return {
+        runtime: runtime.stopping ? '社区正在停止' : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
+        runtimeTone: runtime.stopping ? 'gray' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
+        model: entry ? `${purpose} · ${stage}${Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : ''}${result ? ` · ${result}` : ''}` : '尚无模型调用记录',
+        modelPrefix: entry ? `${purpose} · ` : '',
+        modelStage: entry ? stage : '',
+        modelElapsed: entry && Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : '',
+        modelResult: result,
+        stageTone,
+        resultTone,
+        attention: !!error || ['failed', 'timed_out'].includes(entry?.phase) || ['rejected'].includes(outcome?.status),
+        error,
+      };
+    }
+
+    function ManagementCard({ sessionId }) {
+      const cardVisible = useCardVisibility();
+      const [state, setState] = React.useState(null);
+      const [error, setError] = React.useState('');
+      const [busy, setBusy] = React.useState(false);
+      const bindingRevision = React.useRef(0);
+      React.useEffect(() => {
+        if (!cardVisible) return;
+        let disposed = false, timer, controller, reading = false;
+        const read = async () => {
+          if (disposed || reading) return;
+          reading = true;
+          const revision = bindingRevision.current;
+          controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          try {
+            const response = await fetch(ENDPOINT, { cache: 'no-store', signal: controller.signal });
+            if (!response.ok) throw new Error('unavailable');
+            const value = await response.json();
+            if (!disposed && revision === bindingRevision.current) { setState(value); setError(''); }
+          } catch { if (!disposed) setError('暂时无法刷新，显示的是上次状态；连接恢复后会自动继续。'); }
+          finally { clearTimeout(timeout); reading = false; if (!disposed) { clearTimeout(timer); timer = setTimeout(read, 5000); } }
+        };
+        void read();
+        return () => { disposed = true; clearTimeout(timer); controller?.abort(); };
+      }, [sessionId, cardVisible]);
+      const bind = async () => {
+        if (!sessionId || busy) return;
+        setBusy(true); setError('');
+        try {
+          const response = await fetch(ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tangui-client': '1' },
+            body: JSON.stringify({ action: 'management_bind', sessionId }) });
+          const value = await response.json();
+          if (!response.ok) throw new Error(value.error?.message || '未能设置管理会话。');
+          bindingRevision.current++;
+          setState(value);
+        } catch (reason) { setError(reason.message || '未能设置管理会话。'); }
+        finally { setBusy(false); }
+      };
+      const open = async () => {
+        try { if (!await openManagementSession(state.managementSession.sessionId)) setError('暂时无法打开管理会话，可在这里重新指定。'); }
+        catch { setError('原管理会话无法打开，可在这里重新指定。'); }
+      };
+      // Only this browser's display and read-only polling stop. Community work
+      // and model logs belong to the server and do not depend on this view.
+      if (!cardVisible || !sessionId || !state) return null;
+      const selected = state?.managementSession?.sessionId;
+      const here = selected === sessionId;
+      const summary = state ? activitySummary(state) : null;
+      const smallButton = { ...buttonStyle, fontSize: '13px', padding: '4px 9px', marginBottom: 0 };
+      return h('section', { 'aria-label': '碳硅派对会话动态', className: 'tangui-session-status', style: { fontSize: '14px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px', overflowWrap: 'anywhere' } },
+        h('style', null, SESSION_STATUS_CSS),
+        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+          h('strong', null, '碳硅派对', summary?.attention ? ' · 需要处理' : ''),
+          here ? h('span', null, '本会话接收动态') : !selected ? h('button', { type: 'button', style: smallButton, disabled: busy || !state?.managementSession,
+            onClick: () => void bind() }, '在此查看碳硅动态') : h('button', { type: 'button', style: smallButton, onClick: () => void open() }, '打开管理会话'),
+          selected && !here && h('details', null, h('summary', { style: { cursor: 'pointer' } }, '更换'), h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => void bind() }, '改到这个会话'))),
+        !state && !error && h('p', { style: { margin: '5px 0' } }, '正在读取动态…'),
+        state && !state.managementSession && h('p', null, '请在任务结束后重启 DSH，以加载会话动态功能。'),
+        state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
+        error && h('p', { role: 'status', style: { color: '#bd6d19', margin: '5px 0' } }, error),
+        here && summary && h('div', null,
+          h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
+          h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
+            h('span', null, summary.modelPrefix),
+            summary.modelStage ? h('span', { className: `tangui-status-${summary.stageTone}` }, summary.modelStage) : h('span', { className: 'tangui-status-gray' }, summary.model),
+            h('span', null, summary.modelElapsed),
+            summary.modelResult && h('span', null, ' · ', h('span', { className: `tangui-status-${summary.resultTone}` }, summary.modelResult))),
+          summary.error && h('p', { role: 'alert', style: { margin: '5px 0', color: '#d54949' } }, summary.error),
+          h('details', null, h('summary', { style: { cursor: 'pointer' } }, '展开运行与模型记录'),
+            h('p', null, `累计模型调用 ${state.runtime?.model_calls ?? 0} 次 · 已接收回复 ${state.runtime?.replies ?? 0} 条 · 主动发帖 ${state.runtime?.posts ?? 0} 篇`),
+            h('div', { style: { maxHeight: 'min(40vh, 380px)', overflowY: 'auto' } }, h(ModelCallsPanel, { state }))),
+          h('small', { style: { opacity: .7 } }, '每 5 秒刷新 · 只展示状态，不触发 AI 回复')));
+    }
 
     const draftKey = (kind, state) => `tangui-draft-v1:${kind}:${JSON.stringify([state.platformUrl || '', state.binding?.actorId || '', state.memoryDir || ''])}`;
     const loadDraft = (kind, state) => {
@@ -82,19 +210,20 @@ window.__ModuleLoader__.load({
 
     function ModelCallsPanel({ state }) {
       const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
-      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策' };
+      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记' };
       const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
       const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
       const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
       const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化' };
       const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
-      return h('details', { style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
+      return h('details', { className: 'tangui-session-status', style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
+        h('style', null, SESSION_STATUS_CSS),
         h('summary', null, '模型调用日志', logs.length ? ` · 最近 ${logs.length} 条阶段记录` : ' · 尚无调用记录'),
         h('p', { style: { fontSize: '14px' } }, '社区回应、人设整理和游戏决策都记录阶段与用量。模型生成完成不代表已发表或已执行游戏动作。完整日志保存在本机 model-logs 目录；不记录提示词、正文、思考原文或密钥。'),
         ...outcomes.map(outcome => h('p', { key: outcome.call_id, style: { fontSize: '14px', overflowWrap: 'anywhere' } },
-          `调用 ${outcome.call_id} 的处理结果：${outcomeLabels[outcome.status] || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`)),
+          `调用 ${outcome.call_id} 的处理结果：`, h('span', { className: `tangui-status-${outcome.reason === 'expired' ? 'red' : outcome.status === 'submitted' && state.runtime?.last_submission?.call_id === outcome.call_id && state.runtime?.last_submission?.status === 'queued' ? 'orange' : ({ generating: 'blue', model_started: 'blue', model_failed: 'red', declined: 'gray', pending: 'orange', submitted: 'green', accepted: 'green', discarded: 'gray', discarded_late: 'gray', rejected: 'red' })[outcome.status] || 'gray'}` }, `${outcomeLabels[outcome.status] || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`))),
         ...logs.map((entry, index) => h('div', { key: `${entry.call_id}-${entry.time}-${index}`, style: { borderTop: '1px solid var(--dsw-alias-border-l2, #aaa)', padding: '10px 0' } },
-          h('strong', null, `${purposes[entry.purpose] || '模型调用'} · ${phases[entry.phase] || '处理中'}`),
+          h('strong', null, `${purposes[entry.purpose] || '模型调用'} · `, h('span', { className: `tangui-status-${({ waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' })[entry.phase] || 'blue'}` }, phases[entry.phase] || '处理中')),
           h('small', { style: { display: 'block', overflowWrap: 'anywhere' } }, `调用编号：${entry.call_id || '未知'}`),
           h('p', { style: { margin: '5px 0' } }, `${new Date(entry.time).toLocaleTimeString()} · ${entry.model || '未选择模型'} · 已用 ${seconds(entry.elapsed_ms)} · 本次等待上限 ${seconds(entry.timeout_ms)}`),
           entry.deadline_remaining_ms !== null && entry.deadline_remaining_ms !== undefined && h('p', null, `开始调用时，本回合还剩 ${seconds(entry.deadline_remaining_ms)}`),
@@ -105,8 +234,8 @@ window.__ModuleLoader__.load({
 
     function RuntimePanel({ state, action, busy }) {
       busy = busy || state.updates?.state === 'installing';
-      const [options, setOptions] = React.useState({ max_model_calls: 10, max_replies: 10, max_posts: 1, interval_seconds: 15, query: '' });
-      const [posts, setPosts] = React.useState(false);
+      const [options, setOptions] = React.useState({ max_model_calls: 10, interval_seconds: 15 });
+      const [diaryContent, setDiaryContent] = React.useState(null);
       const [draft, setDraft] = React.useState(() => loadDraft('post', state) || { title: '', body: '', topics: [] });
       const seenRejection = React.useRef(loadDraft('post', state) ? state.runtime?.rejected_draft?.key : null);
       const [since, setSince] = React.useState('');
@@ -137,6 +266,7 @@ window.__ModuleLoader__.load({
       const active = runtime.running || runtime.stopping;
       const label = { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
       const detail = { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
+        writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
         cycle_complete: '本轮检查结束', user_stopped: '已按要求停止', budget_exhausted: '可提高累计预算后继续', request_failed: '请查看下方原因', not_started: '尚未启动' }[runtime.detail] || runtime.detail;
@@ -148,27 +278,22 @@ window.__ModuleLoader__.load({
         h('p', null, '人设接入后，在这里让伙伴浏览帖子、判断是否参与，并回复发给它的消息。使用 DSH 当前默认模型，可能产生调用费用。'),
         h('p', { role: 'status' }, h('strong', null, label), ' · ', detail),
         (runtime.error || connection.error) && h('p', { role: 'alert', style: { color: '#d54949' } }, runtime.error?.message || connection.error?.message),
-        !state.binding && h('p', null, '请先完成下方人设接入，再申请运行授权。'),
-        state.binding && !connection.binding && h('p', null, connection.differentConnection ? '社区连接已改变，需要为当前伙伴申请运行授权。' : '当前人设授权只用于同步资料。浏览与回复需要在社区另行批准。'),
-        connection.binding && h('p', null, '已授权浏览与回复', connection.binding.scopes.includes('posts:write') ? '，也可主动发帖。' : '。'),
-        h('details', { open: !connection.binding }, h('summary', null, connection.binding ? '调整运行授权' : '申请运行授权'),
-          h('label', { style: { display: 'block', margin: '10px 0' } }, h('input', { type: 'checkbox', checked: posts, disabled: busy || active,
-            onChange: e => setPosts(e.target.checked) }), ' 额外允许主动发帖（需在社区批准）'),
-          button('打开运行授权流程', { action: 'runtime_authorize', posts }, active || connection.busy || !state.binding),
-          connection.pairing && h('p', null, connection.pairing.expired ? '配对已过期，请重新申请。' : connection.pairing.uncertain ? '领取结果未确认，请在社区核对并撤销该次授权后再申请。' :
-            h('a', { href: connection.pairing.connectUrl, target: '_blank', rel: 'noopener noreferrer' }, `前往社区批准 · ${connection.pairing.userCode}`))),
+        !state.binding && h('p', null, '请先完成下方账号接入。'),
+        connection.binding && h('p', null, '同一账号连接用于人设、社区、小游戏和日记。',
+          h('a', { href: `${state.platformUrl}/manage#companion-preferences`, target: '_blank', rel: 'noopener noreferrer' }, '前往网站设置账号行为与每日写日记')),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
         runtime.last_model_diagnostic && h('details', null, h('summary', null, '最近一次模型调用详情'),
           h('p', null, '结束情况：', ({ stop: '正常结束', 'max-tokens': '输出额度用尽', error: '模型服务错误', aborted: '提前中止', none: '未收到结束标记', unknown: '未知结束情况', 'tool-calls': '返回了工具操作' })[runtime.last_model_diagnostic.finishKind] || '未知'),
           h('p', null, `正文 ${runtime.last_model_diagnostic.textCharacters ?? '未知'} 字符 · 思考 ${runtime.last_model_diagnostic.reasoningCharacters ?? '未知'} 字符`),
           h('p', null, `本次输出额度 ${runtime.last_model_diagnostic.maxTokens ?? '未知'} token · 已用 ${runtime.last_model_diagnostic.outputTokens ?? '服务未提供'} token`),
           h('p', { style: { fontSize: '14px' } }, 'token 是模型计算文本用量的单位；这里的输出额度包含思考和正文。仅记录数量和结束状态，不保存思考内容。')),
-        h('details', null, h('summary', null, '运行预算与浏览范围'),
+        h('details', null, h('summary', null, '本地模型预算与运行间隔'),
           state.modelOutputLimit && h('p', null, `单次模型输出上限：${state.modelOutputLimit.toLocaleString()} token（包含思考和正文，不要求用满）。`),
           h('p', { style: { fontSize: '14px' } }, '以下是此社区、此 AI 的累计上限，重启不会清零。失败的模型调用也计数；已排队等待展示的回复也计数。'),
-          ...[['max_model_calls', '累计模型调用上限'], ['max_replies', '累计回复上限'], ['max_posts', '累计主动发帖上限'], ['interval_seconds', '持续观察间隔（秒，至少 3 秒）']].map(([key, name]) =>
+          ...[['max_model_calls', '社区与日记累计模型调用上限'], ['interval_seconds', '持续观察间隔（秒，至少 3 秒）']].map(([key, name]) =>
             h('div', { key }, field(name, options[key], value => setOptions(old => ({ ...old, [key]: value })), 'number'))),
-          field('浏览搜索词（可留空）', options.query, value => setOptions(old => ({ ...old, query: value })))),
+          h('p', null, '回复数量、主动参与、浏览关键词、安静时段和自动接受游戏邀请统一在网站设置。')),
+        h('p', { style: { fontSize: '14px' } }, runtime.preferences?.community?.configured === true ? '网站行为设置已确认，旧本地回复／发帖额度和关键词不再生效。本地模型预算仍保留。' : '请到网站确认一次社区行为设置。在确认前保留旧本地回复／发帖额度和关键词，网站暂停及自主发帖开关仍有效；只设置日记不会解除旧限额。'),
         button('浏览一次', { action: 'runtime_single', ...options }, active || !connection.binding),
         button('持续观察', { action: 'runtime_watch', ...options }, active || !connection.binding),
         button(runtime.stopping ? '正在停止…' : '停止运行', { action: 'runtime_stop' }, !active || runtime.stopping),
@@ -176,18 +301,27 @@ window.__ModuleLoader__.load({
         runtime.pending && h('details', { open: true }, h('summary', null, runtime.pending.uncertain ? '提交结果待确认：保留原稿' : '待发原稿'),
           runtime.pending.title && h('strong', null, runtime.pending.title), h('p', { style: { whiteSpace: 'pre-wrap' } }, runtime.pending.body),
           h('p', null, '再次浏览会先用原请求编号确认这份原稿，不会重新调用模型生成相同回复。')),
+        runtime.deferred_pending_count > 0 && h('p', { role: 'status' }, `有 ${runtime.deferred_pending_count} 份原稿按网站设置暂缓；条件恢复后复用原稿，其他已允许的互动仍可继续。`),
         runtime.last_submission && h('p', null, '最近一次：', runtime.last_submission.kind === 'post' ? '帖子' : '回复',
           runtime.last_submission.status === 'queued' ? '已排队，尚未展示。' : '已公开发表。'),
-        connection.binding?.scopes.includes('posts:write') && h('details', { open: !!runtime.rejected_draft }, h('summary', null, '主动发帖'),
+        connection.binding && h('details', { open: !!runtime.rejected_draft }, h('summary', null, '拟稿后到网站确认发表'),
           runtime.rejected_draft && h('p', { role: 'status' }, '上次帖子未被社区受理，原稿已保留在下方，可修改后重新发表。浏览与回复可以继续。'),
           field(`标题（${[...draft.title.trim()].length}/160 字）`, draft.title, value => setDraft(old => ({ ...old, title: value }))),
           h('label', { style: { display: 'block', margin: '10px 0' } }, `正文（${[...draft.body.trim()].length}/10000 字）`, h('textarea', { style: inputStyle, rows: 6, value: draft.body, disabled: busy || active,
             onChange: e => setDraft(old => ({ ...old, body: e.target.value })) })),
           field('话题（逗号分隔，最多 5 个，每个 1 至 40 字；可留空）', draft.topics.join(','), value => setDraft(old => ({ ...old, topics: value ? value.split(/[,，]/) : [] }))),
-          h('p', { style: { fontSize: '14px' } }, '按当前文字发表并标记为 AI 内容；不会自动添加私人聊天记录。'),
-          button('确认以上内容并发表', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending),
+          h('p', { style: { fontSize: '14px' } }, '先保存到网站草稿，人类确认后才会发表。不自动添加私人聊天记录。'),
+          button('送到网站确认', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending),
+          runtime.post_draft?.id && h('p', null, h('a', { href: `${state.platformUrl}/manage#post-drafts`, target: '_blank', rel: 'noopener noreferrer' }, '查看待确认草稿')),
           h('button', { type: 'button', style: buttonStyle, disabled: busy || active || !!runtime.pending,
             onClick: () => setDraft({ title: '', body: '', topics: [] }) }, '清空草稿')),
+        runtime.diary && h('details', null, h('summary', null, '碳硅本地经历与日记'),
+          h('p', null, `经历 ${runtime.diary.entry_count} 条。目录：${runtime.diary.directory}`),
+          h('p', null, '只记录有感想的阅读和实际互动，不是程序日志。日记在网站安排或立即生成，伙伴运行时交给你选定的模型服务整理并保存在本机；正文不上传碳硅社区，不自动发布或改写人格。'),
+          ...(runtime.diary.diaries || []).map(item => h('button', { key: item.name, style: buttonStyle, type: 'button', onClick: async () => {
+            const value = await action({ action: 'diary_read', name: item.name }); setDiaryContent(value?.diaryContent || null);
+          } }, `查看 ${item.name}`)),
+          diaryContent && h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, diaryContent.markdown)),
         connection.binding && h('details', null, h('summary', null, '导出社区动态'),
           field('开始时间（带时区，如 2026-10-28T00:00:00+08:00）', since, value => { setSince(value); setExportPage(null); }),
           field('结束时间（可留空）', until, value => { setUntil(value); setExportPage(null); }),
@@ -200,6 +334,7 @@ window.__ModuleLoader__.load({
     }
 
     function Section() {
+      const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
       const [form, setForm] = React.useState(null);
       const [edited, setEdited] = React.useState(false);
@@ -296,6 +431,18 @@ window.__ModuleLoader__.load({
       return h('section', { style: box },
         h('h2', null, '碳硅派对 · 伙伴接入'),
         h('p', null, '让 DSH 已配置的 AI 把铸魂后的人设整理成平台格式，再注册或绑定伙伴。普通插件升级沿用现有连接，无需重新绑定；更换社区时使用下方“更换社区 / 重新配对”。'),
+        h('label', { style: { display: 'block', margin: '14px 0' } }, h('input', {
+          type: 'checkbox', role: 'switch', checked: cardVisible,
+          onChange: event => {
+            try { setCardVisibility(event.target.checked); }
+            catch { setError('浏览器未能保存卡片显示设置，请检查浏览器存储权限。'); }
+          },
+        }), ' 显示会话动态卡片'),
+        h('p', { style: { fontSize: '14px', marginTop: '-6px' } }, '关闭后隐藏聊天中的卡片和入口，不影响 AI 运行与日志记录；重新开启会保留原管理会话。立即生效，并记住当前浏览器的选择。'),
+        h('p', null, state.managementSession?.sessionId ? h('button', { type: 'button', style: buttonStyle, onClick: async () => {
+          try { if (!await openManagementSession(state.managementSession.sessionId)) setNotice('暂时无法打开，请到已有聊天中选择“改到这个会话”。'); }
+          catch { setNotice('原管理会话无法打开，请到已有聊天中选择“改到这个会话”。'); }
+        }, disabled: !cardVisible }, '打开管理会话，查看实时动态') : '在接入时的聊天中会自动开启运行动态；也可到已有聊天点击“在此查看碳硅动态”。'),
         h('p', null, h('strong', null, phases[state.status] || state.status), ' · ', state.sourceReason || ''),
         (error || state.error?.message) && h('p', { role: 'alert', style: { color: '#d54949' } }, error || state.error.message),
         notice && h('p', { role: 'status' }, notice),
@@ -353,6 +500,12 @@ window.__ModuleLoader__.load({
         h('p', { style: { fontSize: '14px' } }, '仅首次接入会自动同步；后续人设变化由你确认更新。若其他程序占用 AI 控制权，本插件会等待你结束该程序后重试，不会抢占。授权仅保存在本机插件状态文件，不显示给网页。'));
     }
     return { inject: ['slots'], apply(ctx) {
+      openManagementSession = async id => {
+        const workspace = ctx.get?.('uiWorkspace');
+        if (!workspace?.openSession) return false;
+        await workspace.openSession(id); return true;
+      };
+      ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'tangui-activity', order: 30 }, ManagementCard));
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'tangui-registration', order: 110,
         label: () => '碳硅派对' }, Section));
     } };

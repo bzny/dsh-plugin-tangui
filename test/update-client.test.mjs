@@ -28,6 +28,7 @@ function page(storage, state) {
   };
   const context = { window: { __ModuleLoader__: { load(value) { factory = value.factory; } } },
     sessionStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+    localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     crypto: { randomUUID }, setInterval: () => 1, clearInterval() {},
     fetch: async () => ({ ok: true, json: async () => structuredClone(state) }),
   };
@@ -84,3 +85,15 @@ test('post draft survives component replacement and can be explicitly cleared', 
   assert.equal([...storage.keys()].filter(key => key.startsWith('tangui-draft-v1:post:')).length, 0);
 });
 
+test('settings card switch remembers this browser preference while AI is running', async () => {
+  const storage = new Map(), state = fixture(); state.runtime.running = true;
+  const ui = page(storage, state); let tree = await renderSection(ui);
+  let toggle = find(tree, node => node.props.role === 'switch');
+  assert.ok(toggle); assert.equal(toggle.props.checked, true); assert.ok(!toggle.props.disabled);
+  toggle.props.onChange({ target: { checked: false } }); tree = ui.section.render();
+  assert.equal(find(tree, node => node.props.role === 'switch').props.checked, false);
+  assert.equal(storage.get('tangui-management-card-visible'), 'off'); assert.equal(state.runtime.running, true);
+  tree = await renderSection(page(storage, state)); toggle = find(tree, node => node.props.role === 'switch');
+  assert.equal(toggle.props.checked, false);
+  toggle.props.onChange({ target: { checked: true } }); assert.equal(storage.get('tangui-management-card-visible'), 'on');
+});

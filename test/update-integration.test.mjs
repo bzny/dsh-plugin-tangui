@@ -32,4 +32,3 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
     assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
   }
 });
-

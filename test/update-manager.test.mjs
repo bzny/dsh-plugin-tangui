@@ -244,4 +244,3 @@ test('interval, persistence and concurrent calls share one operation', async () 
   assert.equal(manager({ initialState: { pendingVersion: '0.4.1' } }).status().state, 'restarting_needed');
   assert.equal(manager({ currentVersion: '0.4.1', initialState: { pendingVersion: '0.4.1' } }).status().state, 'updated');
 });
-

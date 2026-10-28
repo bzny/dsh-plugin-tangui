@@ -163,9 +163,10 @@ test('explicit post preserves its original key across uncertain response and exp
   const acquired = f.remote.acquired; const result = await restarted.exportActivity(); assert.equal(result.data.length, 1); assert.equal(f.remote.acquired, acquired);
 });
 
-test('persona-only credentials cannot silently obtain runtime authority', async t => {
+test('server effective capabilities are checked before using a stored persona credential', async t => {
   const f = fixture(t); f.binding.scopes = ['persona:write'];
-  assert.throws(() => f.runtime.start(), { code: 'runtime_scope_required' }); assert.equal(f.remote.calls.length, 0);
+  f.runtime.start(); await f.runtime.settled();
+  assert.equal(f.runtime.publicStatus().error.code, 'runtime_identity_mismatch'); assert.equal(f.remote.modelCalls, 0); assert.equal(f.remote.acquired, 0);
 });
 
 test('decision parser rejects malformed output and tool instructions without publishing', () => {
@@ -200,7 +201,10 @@ function connectionFixture(t) {
       data = { token: 'PRIVATE_RUNTIME_TOKEN', actor_id: 'ai-test', grant_id: 'grant-test' };
     } else if (path === '/api/v1/me') {
       if (remote.failMe) throw new Error('temporary me outage');
-      data = { actor: { kind: 'ai', id: 'ai-test', name: '伙伴' }, scopes: remote.scopes };
+      if (remote.revoked) return { ok: false, status: 401, json: async () => ({ error: { code: 'unauthorized' } }) };
+      data = { actor: { kind: 'ai', id: remote.actorId || 'ai-test', name: '伙伴' }, scopes: remote.scopes,
+        ...(Object.hasOwn(remote, 'effectiveScopes') ? { effective_scopes: remote.effectiveScopes } : {}),
+        ...(remote.grantedScopes ? { granted_scopes: remote.grantedScopes } : {}) };
     } else throw new Error('unexpected endpoint');
     return { ok: true, status: 200, json: async () => ({ data }) };
   };
@@ -224,10 +228,42 @@ test('redeemed candidate survives restart and me retry never redeems twice', asy
   assert.ok(restarted.binding()); assert.equal(f.remote.issued, 1);
 });
 
-test('unexpected scope expansion retains old runtime authorization and fails closed', async t => {
+test('legacy pending pairing accepts the same account with server-confirmed additional scopes', async t => {
+  const unified = [...scopes, 'posts:write', 'persona:write', 'dm:read', 'dm:write', 'games:play'];
+  for (const posts of [false, true]) {
+    const f = connectionFixture(t), c = f.make(); await c.authorize({ posts });
+    f.remote.scopes = [...unified]; f.remote.grantedScopes = [...scopes, ...(posts ? ['posts:write'] : [])];
+    f.advance(); await c.tick();
+    assert.deepEqual(c.binding().scopes, unified); assert.equal(c.publicStatus().pairing, null);
+    assert.equal(f.remote.issued, 1); assert.equal(c.binding().actorId, 'ai-test');
+  }
+});
+
+test('persisted candidate previously marked uncertain is only revalidated and never redeemed twice', async t => {
+  const f = connectionFixture(t), c = f.make(); await c.authorize();
+  f.remote.failMe = true; f.advance(); await c.tick();
+  c.state.pair.uncertain = true; c.save(); // State left by the older exact-scope validator.
+  f.remote.failMe = false; f.remote.effectiveScopes = [...scopes, 'posts:write', 'persona:write', 'dm:read', 'dm:write', 'games:play'];
+  f.remote.grantedScopes = [...scopes];
+  const restarted = f.make(); f.advance(); await restarted.tick();
+  assert.deepEqual(restarted.binding().scopes, f.remote.effectiveScopes);
+  assert.equal(restarted.state.pair, null); assert.equal(f.remote.issued, 1);
+});
+
+test('candidate scope compatibility still rejects another actor, missing access, manage, malformed or revoked credentials', async t => {
+  for (const change of [{ actorId: 'other-ai' }, { scopes: ['posts:read'] }, { scopes: [...scopes, 'manage'] },
+    { effectiveScopes: [] }, { effectiveScopes: null }, { effectiveScopes: 'posts:read' }, { revoked: true }]) {
+    const f = connectionFixture(t), c = f.make(); await c.authorize(); Object.assign(f.remote, change);
+    f.advance(); await c.tick();
+    assert.equal(c.binding(), null); assert.equal(f.remote.issued, 1);
+    assert.equal(c.publicStatus().error.code, change.revoked ? 'unauthorized' : 'runtime_scope_mismatch');
+  }
+});
+
+test('existing account connection is reused without a second feature pairing or credential change', async t => {
   const f = connectionFixture(t), c = f.make(); await c.authorize(); f.advance(); await c.tick();
   const old = c.binding(); await c.authorize({ posts: true }); f.remote.scopes = [...scopes, 'posts:write', 'persona:write'];
-  f.advance(); await c.tick(); assert.deepEqual(c.binding(), old); assert.equal(c.publicStatus().error.code, 'runtime_scope_mismatch');
+  f.advance(); await c.tick(); assert.deepEqual(c.binding(), old); assert.equal(c.publicStatus().error, null); assert.equal(f.remote.issued, 1);
 });
 
 test('uncertain one-shot token redemption is not silently retried after restart', async t => {

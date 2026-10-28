@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommunityRuntime } from '../lib/runtime.js';
+import { LocalDiary } from '../lib/local-diary.js';
 import { createRuntimeModel } from '../lib/runtime-model.js';
 import { createDshGameDecider } from '../lib/game-model.js';
 import { createModelCallLogger, safeModelCallId } from '../lib/model-call-log.js';
@@ -63,6 +64,7 @@ function runtimeFixture(t, decide) {
   const runtime = new CommunityRuntime({ directory, connection: { binding: () => null }, decide,
     now: () => 100 });
   runtime.stateFile = join(directory, 'runtime.json');
+  runtime.diary = new LocalDiary({ directory, baseUrl: 'http://127.0.0.1:1', actorId: 'ai-fixture' });
   runtime.state = { version: 1, identity: { base_url: 'http://127.0.0.1:1', actor_id: 'ai-fixture' },
     model_calls: 0, replies: 0, posts: 0, cursor: '0', discovery_cursor: '0', completed: [], pending: null };
   runtime.abort = new AbortController();
@@ -70,10 +72,10 @@ function runtimeFixture(t, decide) {
   runtime.lease = { epoch: 1, deadline: 1000 };
   runtime.limits = { max_model_calls: 10, max_replies: 10, max_posts: 1 };
   runtime.get = async path => path.includes('/comments?') ? { data: [] }
-    : { data: { id: 'post-fixture', title: 'Fixture', body: 'public fixture', author: { id: 'human', kind: 'human' } } };
+    : { data: { id: path.split('/').at(-1), title: 'Fixture', body: 'public fixture', author: { id: 'human', kind: 'human' } } };
   const submissions = [];
   runtime.write = async (path, body, key) => { submissions.push({ path, body, key }); return { id: 'comment-fixture', status: 'queued' }; };
-  return { runtime, submissions, invoke: () => runtime.decideOn('post-fixture', 'browse:post-fixture', null, null, {}) };
+  return { runtime, submissions, invoke: (postId = 'post-fixture') => runtime.decideOn(postId, `browse:${postId}`, null, null, {}) };
 }
 const reportedDecision = value => async (context, signal, diagnostic, onCall) => { onCall(CALL_ID); return value; };
 
@@ -124,7 +126,10 @@ test('community declined and model-failed decisions retain distinct outcomes wit
   await f.invoke();
   assert.equal(f.runtime.publicStatus().last_model_call.status, 'declined');
   f.runtime.decide = async (context, signal, diagnostic, onCall) => { onCall(CALL_ID); throw new Error('fixture'); };
-  await assert.rejects(f.invoke(), /fixture/);
+  // The declined first post is now persistently deduplicated; use new content
+  // to exercise model failure rather than bypassing content deduplication.
+  await assert.rejects(f.invoke('post-failed-fixture'), /fixture/);
+  assert.equal(f.runtime.state.model_calls, 2);
   assert.equal(f.runtime.publicStatus().last_model_call.status, 'model_failed');
   assert.equal(f.submissions.length, 0);
 });
@@ -152,7 +157,8 @@ test('community strips invalid ids and ignores callbacks belonging to an old ide
     f.runtime.abort.abort();
     return response;
   };
-  await assert.rejects(f.invoke(), { code: 'run_stopped' });
+  await assert.rejects(f.invoke('post-old-identity-fixture'), { code: 'run_stopped' });
+  assert.equal(f.runtime.state.model_calls, 2);
   assert.equal(f.runtime.publicStatus().last_model_call, null);
   assert.equal(f.submissions.length, 1);
 });
