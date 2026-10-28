@@ -78,9 +78,9 @@ function fixture(t, options = {}) {
     }
     return error('not_found', 404);
   };
-  const model = async (context, signal) => {
+  const model = async (context, signal, onDiagnostic) => {
     remote.modelCalls++; remote.modelInputs.push(context);
-    return options.decide ? options.decide(context, signal) : { participate: true, body: '我喜欢共同交流的游戏。' };
+    return options.decide ? options.decide(context, signal, onDiagnostic) : { participate: true, body: '我喜欢共同交流的游戏。' };
   };
   const connection = { binding: () => binding };
   const make = () => new CommunityRuntime({ directory, connection, decide: model, fetchImpl, presenceMs: 20 });
@@ -268,11 +268,27 @@ test('DSH runtime adapter refuses incomplete output and cancels without leaking 
   const context = stream => () => ({ agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test' }) },
     llm: { prepareCall: async () => ({ config: {}, stream }) } });
   const incomplete = createRuntimeModel(context(async function* () { yield { type: 'text-delta', index: 0, text: '{"participate":true,"body":"x"}' }; }));
-  await assert.rejects(() => incomplete({}), { code: 'invalid_model_decision' });
+  await assert.rejects(() => incomplete({}), { code: 'runtime_model_incomplete' });
   const failed = createRuntimeModel(context(async function* () { throw new Error('PRIVATE_PROVIDER_ERROR'); }));
-  await assert.rejects(() => failed({}), error => error.code === 'runtime_model_failed' && !error.message.includes('PRIVATE'));
+  await assert.rejects(() => failed({}), error => error.code === 'runtime_model_provider_error' && !error.message.includes('PRIVATE'));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(() => incomplete({}, controller.signal), { code: 'run_stopped' });
+});
+
+test('model failure diagnostics survive restart without retaining provider text or posting', async t => {
+  const f = fixture(t, { decide: async (context, signal, report) => {
+    report({ finishKind: 'max-tokens', failureCode: 'PRIVATE_SECRET', maxTokens: 64000,
+      textCharacters: 0, reasoningCharacters: 4200, inputTokens: 100, outputTokens: 64000,
+      rawText: 'PRIVATE_SECRET' });
+    throw new Error('PRIVATE_PROVIDER_ERROR');
+  } });
+  f.runtime.start(); await f.runtime.settled();
+  assert.equal(f.remote.modelCalls, 1); assert.equal(f.remote.submissions.length, 0);
+  const status = f.make().publicStatus();
+  assert.deepEqual(status.last_model_diagnostic, { finishKind: 'max-tokens', failureCode: null,
+    maxTokens: 64000, textCharacters: 0, reasoningCharacters: 4200, inputTokens: 100, outputTokens: 64000 });
+  assert.doesNotMatch(readFileSync(f.runtime.stateFile, 'utf8'), /PRIVATE/);
+  assert.doesNotMatch(JSON.stringify(status), /PRIVATE/);
 });
 
 test('post boundaries match server contract before any pending draft or request is created', async t => {

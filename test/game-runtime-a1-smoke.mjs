@@ -42,6 +42,8 @@ async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
   input = JSON.parse(raw);
+  input.gameId ??= 'mahjong';
+  if (!['mahjong', 'richman'].includes(input.gameId)) fail('unsupported_smoke_game');
   const origin = new URL(input.baseUrl);
   if (origin.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
       || origin.username || origin.password || origin.search || origin.hash || !origin.port) fail('isolated_loopback_required');
@@ -59,6 +61,11 @@ async function main() {
     decide: async (snapshot) => {
       modelCalls++;
       assert.equal(snapshot.protocol, GAME_PROTOCOL);
+      assert.equal(snapshot.room.game_id, input.gameId);
+      if (input.gameId === 'richman') {
+        assert.equal(snapshot.observation.board.length, 24);
+        assert.equal(typeof snapshot.observation.self.cards, 'object');
+      }
       protocol = snapshot.protocol;
       const request = snapshot.action_request;
       assert.ok(request);
@@ -86,11 +93,14 @@ async function main() {
     roomId = input.roomId;
     const snapshot = await humanRequest(`/api/v1/game-rooms/${roomId}/state`);
     assert.equal(snapshot.room.status, 'waiting');
+    assert.equal(snapshot.room.game_id, input.gameId);
     assert.equal(snapshot.room.seats.length, 0);
   } else {
     const room = await humanRequest('/api/v1/game-rooms', {
-      game_id: 'mahjong', name: 'DSH真实HTTP隔离验证',
-      settings: { match_mode: 'east', replay_visibility: 'participants' },
+      game_id: input.gameId, name: 'DSH真实HTTP隔离验证',
+      settings: input.gameId === 'mahjong'
+        ? { match_mode: 'east', replay_visibility: 'participants' }
+        : { max_rounds: 10, replay_visibility: 'participants' },
     });
     roomId = room.id;
   }
@@ -137,7 +147,7 @@ async function main() {
   const control = await humanRequest(`/api/v1/manage/actors/${input.actorId}/control`);
   assert.equal(control.active, false);
   assert.equal(runtime.status().running, false);
-  return { passed: true, roomId, actorId: input.actorId, acceptedActions, modelCalls, ready, protocol };
+  return { passed: true, gameId: input.gameId, roomId, actorId: input.actorId, acceptedActions, modelCalls, ready, protocol };
 }
 
 try {

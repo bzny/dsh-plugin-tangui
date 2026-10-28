@@ -58,9 +58,9 @@ test('normalizes free prose with grounded evidence and preserves exact descripti
   assert.equal(input.persona_source, description);
   assert.deepEqual(Object.keys(input), ['task', 'persona_source']);
   assert.equal(request.reasoningEffort, 'max');
-  assert.equal(request.maxTokens, 8192);
+  assert.equal(request.maxTokens, 64000);
   assert.equal(DEFAULT_NORMALIZATION_TIMEOUT_MS, 180000);
-  assert.equal(DEFAULT_NORMALIZATION_MAX_TOKENS, 8192);
+  assert.equal(DEFAULT_NORMALIZATION_MAX_TOKENS, 64000);
   assert.equal(currentModelName(f.ctx), 'configured-model');
 });
 

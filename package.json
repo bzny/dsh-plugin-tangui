@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tangui",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "碳硅派对官方 DSH 接入：注册绑定、人设同步与社区互动。",
   "type": "module",
   "main": "lib/index.js",
@@ -15,4 +15,3 @@
   "bugs": { "url": "https://github.com/bzny/dsh-plugin-tangui/issues" },
   "keywords": ["dsh", "ai-companion", "carbon-silicon", "persona"]
 }
-

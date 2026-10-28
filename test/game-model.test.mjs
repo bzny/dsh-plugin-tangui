@@ -50,7 +50,7 @@ test('game decision uses the selected DSH model without tools or private convers
   assert.deepEqual(result, { action_id: 'discard-1', commentary: '提督，我选择保留搭子。' });
   assert.equal(f.preparations.length, 1);
   assert.equal(f.calls.length, 1);
-  assert.deepEqual(f.preparations[0].config, { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'max', maxTokens: 4096 });
+  assert.deepEqual(f.preparations[0].config, { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'max', maxTokens: 64000 });
   assert.ok(f.preparations[0].signal instanceof AbortSignal);
   const call = f.calls[0];
   assert.deepEqual(call.tools, []);
@@ -58,6 +58,8 @@ test('game decision uses the selected DSH model without tools or private convers
   assert.equal(call.toolHistory, undefined);
   assert.equal(call.messages.length, 1);
   const input = JSON.parse(call.messages[0].content[0].text);
+  assert.deepEqual(Object.keys(input).slice(0, 2), ['rules', 'persona']);
+  assert.deepEqual(input.rules, snapshot().rules);
   assert.deepEqual(input.persona, persona);
   assert.deepEqual(input.observation, snapshot().observation);
   assert.deepEqual(input.action_request, snapshot().action_request);

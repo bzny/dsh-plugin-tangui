@@ -80,6 +80,29 @@ window.__ModuleLoader__.load({
         update.lastCheck && h('p', { style: { fontSize: '14px' } }, `上次检查：${new Date(update.lastCheck).toLocaleString()}`));
     }
 
+    function ModelCallsPanel({ state }) {
+      const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
+      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策' };
+      const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
+      const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
+      const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
+      const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化' };
+      const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
+      return h('details', { style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
+        h('summary', null, '模型调用日志', logs.length ? ` · 最近 ${logs.length} 条阶段记录` : ' · 尚无调用记录'),
+        h('p', { style: { fontSize: '14px' } }, '社区回应、人设整理和游戏决策都记录阶段与用量。模型生成完成不代表已发表或已执行游戏动作。完整日志保存在本机 model-logs 目录；不记录提示词、正文、思考原文或密钥。'),
+        ...outcomes.map(outcome => h('p', { key: outcome.call_id, style: { fontSize: '14px', overflowWrap: 'anywhere' } },
+          `调用 ${outcome.call_id} 的处理结果：${outcomeLabels[outcome.status] || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`)),
+        ...logs.map((entry, index) => h('div', { key: `${entry.call_id}-${entry.time}-${index}`, style: { borderTop: '1px solid var(--dsw-alias-border-l2, #aaa)', padding: '10px 0' } },
+          h('strong', null, `${purposes[entry.purpose] || '模型调用'} · ${phases[entry.phase] || '处理中'}`),
+          h('small', { style: { display: 'block', overflowWrap: 'anywhere' } }, `调用编号：${entry.call_id || '未知'}`),
+          h('p', { style: { margin: '5px 0' } }, `${new Date(entry.time).toLocaleTimeString()} · ${entry.model || '未选择模型'} · 已用 ${seconds(entry.elapsed_ms)} · 本次等待上限 ${seconds(entry.timeout_ms)}`),
+          entry.deadline_remaining_ms !== null && entry.deadline_remaining_ms !== undefined && h('p', null, `开始调用时，本回合还剩 ${seconds(entry.deadline_remaining_ms)}`),
+          entry.first_output_ms !== null && entry.first_output_ms !== undefined && h('p', null, `首次收到正文或思考：${seconds(entry.first_output_ms)}`),
+          entry.event === 'finished' && h('p', null, `输出额度 ${entry.max_tokens ?? '未知'} token · 已用 ${entry.output_tokens ?? '服务未提供'} token · 正文 ${entry.text_characters ?? '未知'} 字符 · 思考 ${entry.reasoning_characters ?? '未知'} 字符`),
+          entry.error_code && h('p', { style: { color: '#d54949' } }, `诊断代码：${entry.error_code}`))));
+    }
+
     function RuntimePanel({ state, action, busy }) {
       busy = busy || state.updates?.state === 'installing';
       const [options, setOptions] = React.useState({ max_model_calls: 10, max_replies: 10, max_posts: 1, interval_seconds: 15, query: '' });
@@ -135,7 +158,13 @@ window.__ModuleLoader__.load({
           connection.pairing && h('p', null, connection.pairing.expired ? '配对已过期，请重新申请。' : connection.pairing.uncertain ? '领取结果未确认，请在社区核对并撤销该次授权后再申请。' :
             h('a', { href: connection.pairing.connectUrl, target: '_blank', rel: 'noopener noreferrer' }, `前往社区批准 · ${connection.pairing.userCode}`))),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
+        runtime.last_model_diagnostic && h('details', null, h('summary', null, '最近一次模型调用详情'),
+          h('p', null, '结束情况：', ({ stop: '正常结束', 'max-tokens': '输出额度用尽', error: '模型服务错误', aborted: '提前中止', none: '未收到结束标记', unknown: '未知结束情况', 'tool-calls': '返回了工具操作' })[runtime.last_model_diagnostic.finishKind] || '未知'),
+          h('p', null, `正文 ${runtime.last_model_diagnostic.textCharacters ?? '未知'} 字符 · 思考 ${runtime.last_model_diagnostic.reasoningCharacters ?? '未知'} 字符`),
+          h('p', null, `本次输出额度 ${runtime.last_model_diagnostic.maxTokens ?? '未知'} token · 已用 ${runtime.last_model_diagnostic.outputTokens ?? '服务未提供'} token`),
+          h('p', { style: { fontSize: '14px' } }, 'token 是模型计算文本用量的单位；这里的输出额度包含思考和正文。仅记录数量和结束状态，不保存思考内容。')),
         h('details', null, h('summary', null, '运行预算与浏览范围'),
+          state.modelOutputLimit && h('p', null, `单次模型输出上限：${state.modelOutputLimit.toLocaleString()} token（包含思考和正文，不要求用满）。`),
           h('p', { style: { fontSize: '14px' } }, '以下是此社区、此 AI 的累计上限，重启不会清零。失败的模型调用也计数；已排队等待展示的回复也计数。'),
           ...[['max_model_calls', '累计模型调用上限'], ['max_replies', '累计回复上限'], ['max_posts', '累计主动发帖上限'], ['interval_seconds', '持续观察间隔（秒，至少 3 秒）']].map(([key, name]) =>
             h('div', { key }, field(name, options[key], value => setOptions(old => ({ ...old, [key]: value })), 'number'))),
@@ -273,6 +302,7 @@ window.__ModuleLoader__.load({
         state.warning && h('p', { role: 'status' }, state.warning),
         h(UpdatePanel, { update: state.updates, action, busy }),
         h(RuntimePanel, { key: draftKey('post', state), state, action, busy }),
+        h(ModelCallsPanel, { state }),
         field('社区地址', form.platformUrl, (value) => edit((old) => ({ ...old, platformUrl: value }))),
         !supportsConnectionSwitch && h('p', { role: 'status' }, 'DSH 服务尚未加载本次插件更新，请结束当前任务后通过原有启动器重新启动 DSH，再更换社区。仅刷新页面不会更新服务程序。'),
         field('长期记忆目录（自动识别，也可调整）', form.memoryDir, (value) => edit((old) => ({ ...old, memoryDir: value }))),
@@ -328,4 +358,3 @@ window.__ModuleLoader__.load({
     } };
   },
 });
-

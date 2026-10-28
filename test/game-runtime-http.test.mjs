@@ -235,6 +235,113 @@ test('an accepted room confirms fixed versions and makes one legal action only a
   assert.ok(f.count('/api/v1/games/fixture-game/manifest') >= 1);
 });
 
+test('model call correlation: accepted receipts and restart recovery retain the same call without changing action payloads', async (t) => {
+  const callId = randomUUID();
+  const f = await fixture(t, { decide: async (_snapshot, { onModelCall }) => {
+    onModelCall(callId);
+    return { action_id: 'pass', commentary: '关联测试' };
+  } });
+  await connect(f); await ready(f);
+  f.remote.dropActionResponse = true;
+  f.request();
+  await settle(f, () => f.remote.actions.size === 1);
+  const pending = f.saved().journals['fixture-room'].requests['fixture-turn-1'];
+  assert.equal(pending.call_id, callId);
+  assert.equal(pending.submittedOnce, true);
+  assert.deepEqual(f.runtime.status().last_model_call, {
+    call_id: callId, request_id: 'fixture-turn-1', status: 'pending', reason: null,
+  });
+  await f.runtime.stop();
+  f.remote.accepted = false; f.remote.room.status = 'finished';
+  f.runtime = f.restart('fixture-correlated-restart');
+  assert.equal(f.runtime.status().last_model_call.call_id, callId);
+  await f.runtime.start({ maxModelCalls: 1 });
+  await settle(f, () => f.runtime.status().last_model_call?.status === 'accepted');
+  assert.deepEqual(f.runtime.status().last_model_call, {
+    call_id: callId, request_id: 'fixture-turn-1', status: 'accepted', reason: null,
+  });
+  const attempts = f.calls.filter(call => call.path.endsWith('/actions'));
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].headers['idempotency-key'], pending.key);
+  assert.equal(attempts[1].headers['idempotency-key'], pending.key);
+  for (const attempt of attempts) assert.deepEqual(attempt.body, {
+    request_id: 'fixture-turn-1', based_on_revision: 3, decision: { action_id: 'pass' }, commentary: '关联测试',
+  });
+  assert.equal(f.modelCalls.length, 1);
+});
+
+test('model call correlation: stopped, expired and changed states keep the call id without submitting', async (t) => {
+  for (const reason of ['stopped', 'expired', 'state_changed']) await t.test(reason, async child => {
+    const callId = randomUUID();
+    let resolveChoice;
+    const pending = new Promise(resolve => { resolveChoice = resolve; });
+    const f = await fixture(child, { decide: (_snapshot, { onModelCall }) => { onModelCall(callId); return pending; } });
+    await connect(f); await ready(f); f.request();
+    await settle(f, () => f.modelCalls.length === 1);
+    assert.equal(f.runtime.status().last_model_call.call_id, callId);
+    if (reason === 'stopped') await f.runtime.stop();
+    else if (reason === 'expired') f.advance(35000);
+    else f.remote.request.based_on_revision++;
+    resolveChoice({ action_id: 'pass', commentary: '已生成但不应提交' });
+    await pause(); await f.runtime.step();
+    const expected = { call_id: callId, request_id: 'fixture-turn-1',
+      status: reason === 'stopped' ? 'model_started' : 'discarded_late', reason };
+    assert.deepEqual(f.runtime.status().last_model_call, expected);
+    const record = f.saved().journals['fixture-room'].requests['fixture-turn-1'];
+    assert.equal(record.reason, reason); assert.equal(record.call_id, callId);
+    assert.equal(f.count('/api/v1/game-rooms/fixture-room/actions'), 0);
+    assert.equal(f.modelCalls.length, 1);
+    assert.equal(record.payload, undefined);
+  });
+});
+
+test('model call correlation: invalid ids and failed diagnostic saves cannot change the decision or its submission', async (t) => {
+  const callId = randomUUID();
+  let callback, resolveChoice;
+  const pending = new Promise(resolve => { resolveChoice = resolve; });
+  const f = await fixture(t, { decide: (_snapshot, { onModelCall }) => { callback = onModelCall; return pending; } });
+  await connect(f); await ready(f); f.request();
+  await settle(f, () => f.modelCalls.length === 1);
+  callback(`https://fixture.invalid/?token=${GAME_TOKEN}`);
+  assert.equal(f.runtime.status().last_model_call, null);
+  const save = f.runtime.save;
+  f.runtime.save = () => { throw new Error('FIXTURE_DIAGNOSTIC_STORAGE_UNAVAILABLE'); };
+  try { assert.doesNotThrow(() => callback(callId)); }
+  finally { f.runtime.save = save; }
+  assert.equal(f.runtime.status().last_model_call.call_id, callId);
+  resolveChoice({ action_id: 'pass', commentary: '仍应正常提交' });
+  await settle(f, () => f.remote.actions.size === 1);
+  assert.equal(f.runtime.status().last_model_call.status, 'accepted');
+  assert.equal(f.saved().journals['fixture-room'].requests['fixture-turn-1'].call_id, callId);
+  assert.equal(f.modelCalls.length, 1);
+  assert.equal(f.count('/api/v1/game-rooms/fixture-room/actions'), 1);
+  const record = f.runtime.state.journals['fixture-room'].requests['fixture-turn-1'];
+  record.reason = GAME_TOKEN;
+  assert.equal(f.runtime.status().last_model_call.reason, null);
+  assert.doesNotMatch(JSON.stringify(f.runtime.status().last_model_call), /FIXTURE_ONLY_GAME_TOKEN|DIAGNOSTIC_STORAGE/);
+});
+
+test('model call correlation: an old callback cannot write after state or account identity is replaced', async (t) => {
+  for (const change of ['state', 'identity']) await t.test(change, async child => {
+    let callback, resolveChoice;
+    const pending = new Promise(resolve => { resolveChoice = resolve; });
+    const f = await fixture(child, { decide: (_snapshot, { onModelCall }) => { callback = onModelCall; return pending; } });
+    await connect(f); await ready(f); f.request();
+    await settle(f, () => f.modelCalls.length === 1);
+    if (change === 'state') f.runtime.state = JSON.parse(JSON.stringify(f.runtime.state));
+    else f.runtime.state.identity.actorId = 'different-fixture-ai';
+    const before = JSON.stringify(f.runtime.state), savedBefore = readFileSync(f.stateFile, 'utf8');
+    callback(randomUUID());
+    assert.equal(JSON.stringify(f.runtime.state), before);
+    assert.equal(readFileSync(f.stateFile, 'utf8'), savedBefore);
+    assert.equal(f.runtime.status().last_model_call, null);
+    await f.runtime.stop();
+    resolveChoice({ action_id: 'pass', commentary: '旧调用结果' });
+    await pause();
+    assert.equal(f.count('/api/v1/game-rooms/fixture-room/actions'), 0);
+  });
+});
+
 test('control renewals continue while a model decision is unresolved', async (t) => {
   let finish;
   const pending = new Promise((resolveDecision) => { finish = resolveDecision; });
@@ -353,4 +460,63 @@ test('restarting retains cumulative model-call usage and stops before a request 
   assert.equal(f.saved().journals['fixture-room'].modelCalls, 1);
   assert.equal(f.remote.actions.size, 1);
   assert.equal(f.count('/api/v1/game-rooms/fixture-room/actions'), 1);
+});
+
+test('removing a prepared AI leaves only that waiting room and a same-controller reinvitation readies again', async (t) => {
+  const f = await fixture(t);
+  await connect(f);
+  f.remote.room.invitations = [{ id: 'invite-first', actor_id: ACTOR.id, status: 'accepted' }];
+  await ready(f);
+  const first = f.calls.find((call) => call.path.endsWith('/ready'));
+  f.remote.room.invitations = [];
+  await f.runtime.step();
+  assert.equal(f.count('/api/v1/game-rooms/fixture-room/ready'), 1);
+
+  f.remote.room.seats = []; f.remote.accepted = false; f.remote.ready = false;
+  await f.runtime.step();
+  assert.equal(f.runtime.status().status, 'waiting_invitation');
+  assert.equal(f.runtime.status().roomId, null);
+  assert.equal(f.runtime.status().running, true);
+  assert.equal(f.count('/api/v1/agent/control/release'), 0);
+  assert.equal(f.modelCalls.length, 0);
+  assert.equal(f.bridge.state.binding.token, COMMUNITY_TOKEN);
+
+  f.remote.room.invitations = [{ id: 'invite-second', actor_id: ACTOR.id, status: 'accepted' }];
+  await ready(f);
+  const attempts = f.calls.filter((call) => call.path.endsWith('/ready'));
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[1].headers['idempotency-key'], first.headers['idempotency-key']);
+  assert.equal(attempts[1].headers['x-ai-control-epoch'], first.headers['x-ai-control-epoch']);
+  assert.equal(f.count('/api/v1/agent/control/acquire'), 1);
+});
+
+test('a new accepted invitation between polls invalidates only the old room readiness', async (t) => {
+  const f = await fixture(t);
+  await connect(f);
+  f.remote.room.invitations = [{ id: 'invite-first', actor_id: ACTOR.id, status: 'accepted' }];
+  await ready(f);
+  f.remote.room.seats = []; f.remote.ready = false;
+  f.remote.room.invitations = [{ id: 'invite-second', actor_id: ACTOR.id, status: 'accepted' }];
+  await f.runtime.step();
+  const attempts = f.calls.filter((call) => call.path.endsWith('/ready'));
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[0].headers['idempotency-key'], attempts[1].headers['idempotency-key']);
+  assert.equal(f.remote.ready, true);
+  assert.equal(f.count('/api/v1/agent/control/release'), 0);
+});
+
+test('a pending reinvitation cannot silently restore a removed seat', async (t) => {
+  const f = await fixture(t);
+  await connect(f);
+  f.remote.room.invitations = [{ id: 'invite-first', actor_id: ACTOR.id, status: 'accepted' }];
+  await ready(f);
+  f.remote.room.seats = []; f.remote.ready = false; f.remote.accepted = false;
+  f.remote.room.invitations = [{ id: 'invite-second', actor_id: ACTOR.id, status: 'pending' }];
+  await f.runtime.step();
+  await f.runtime.step();
+  assert.equal(f.runtime.status().status, 'waiting_invitation');
+  assert.equal(f.count('/api/v1/game-rooms/fixture-room/ready'), 1);
+  assert.equal(f.remote.ready, false);
+  assert.equal(f.count('/api/v1/agent/control/release'), 0);
+  assert.equal(f.modelCalls.length, 0);
 });
