@@ -15,18 +15,90 @@ window.__ModuleLoader__.load({
     const buttonStyle = { padding: '9px 15px', marginRight: '8px', marginBottom: '8px', borderRadius: '8px', cursor: 'pointer', font: 'inherit',
       border: '1px solid var(--dsw-alias-border-l2, #888)', color: 'inherit', background: 'var(--dsw-alias-bg-layer-2, transparent)' };
 
+    const draftKey = (kind, state) => `tangui-draft-v1:${kind}:${JSON.stringify([state.platformUrl || '', state.binding?.actorId || '', state.memoryDir || ''])}`;
+    const loadDraft = (kind, state) => {
+      try {
+        const value = JSON.parse(sessionStorage.getItem(draftKey(kind, state)) || 'null');
+        if (!value || typeof value !== 'object') return null;
+        if (kind === 'post') return typeof value.title === 'string' && typeof value.body === 'string' &&
+          Array.isArray(value.topics) && value.topics.every(topic => typeof topic === 'string') ? value : null;
+        return typeof value.platformUrl === 'string' && typeof value.memoryDir === 'string' && value.draft &&
+          typeof value.draft.description === 'string' && typeof value.draft.name === 'string' && typeof value.draft.overrides === 'object' ? value : null;
+      } catch { return null; }
+    };
+    const saveDraft = (kind, state, value) => {
+      try {
+        if (value) sessionStorage.setItem(draftKey(kind, state), JSON.stringify(value));
+        else sessionStorage.removeItem(draftKey(kind, state));
+        return true;
+      } catch { return false; }
+    };
+
+    function useUpdateHold(editing) {
+      const clientId = React.useRef(null);
+      if (!clientId.current) clientId.current = crypto.randomUUID();
+      React.useEffect(() => {
+        if (!editing) return;
+        const report = value => { void fetch(ENDPOINT, { method: 'POST', keepalive: true,
+          headers: { 'content-type': 'application/json', 'x-tangui-client': '1' },
+          body: JSON.stringify({ action: 'update_hold', clientId: clientId.current, editing: value }) }).catch(() => {}); };
+        report(true);
+        const timer = setInterval(() => report(true), 10000);
+        return () => { clearInterval(timer); report(false); };
+      }, [editing]);
+    }
+
+    function UpdatePanel({ update, action, busy }) {
+      if (!update) return null;
+      const labels = { current: '当前已是可用版本', checking: '正在检查', available: '发现新版本', waiting_idle: '等待任务结束或保存编辑',
+        installing: '正在安装并验证', restarting_needed: '等待重启 DSH', updated: '新版已生效', rolled_back: '更新未成功，已恢复旧版', error: '更新未完成' };
+      const reasons = { development_check_only: '本机连接的是开发源码，仅检查版本，不自动覆盖。',
+        host_check_only: '此 DSH 暂不支持自动安装，可检查版本后手动更新。', runtime_busy: '请先完成社区运行、游戏、配对或尚未保存的编辑；更新会继续等待。',
+        auto_disabled: '自动安装已关闭。', restart_required: '磁盘版本已更新，当前仍运行旧版；请在方便时通过原有启动器重启 DSH。',
+        rollback_restart_required: '旧版已恢复到磁盘，需要重启 DSH 才能重新生效。',
+        recovery_required: '自动恢复未完成，请保留原状态文件并按仓库说明重新安装。',
+        installation_changed: '安装来源已由其他操作改变，本次自动更新已停止，保留你的新选择。',
+        installation_unavailable: '安装尚未开始，现有插件没有被替换；稍后可重试。' };
+      const errors = { network_unavailable: '暂时无法连接 GitHub，现有功能不受影响。', request_timeout: '检查超时，稍后可以重试。',
+        release_request_failed: 'GitHub 暂未返回版本信息，稍后可以重试。', release_unavailable: '暂时没有可读取的正式版本。',
+        manual_required_dependencies: '新版改变了依赖，需要按仓库说明手动升级。', manual_required_install_scripts: '新版需要额外安装步骤，请按仓库说明手动升级。',
+        rollback_failed: '请保留原有状态，手动检查安装。' };
+      const development = update.installation === 'development-source';
+      const disabled = busy || update.state === 'installing' || update.state === 'checking';
+      return h('details', { style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
+        h('summary', { style: { cursor: 'pointer' } }, `插件更新 · v${update.current} · ${labels[update.state] || '等待检查'}`),
+        h('p', { role: 'status' }, `正在运行 v${update.current}`, update.latest ? ` · 最新正式版 v${update.latest}` : ''),
+        h('label', { style: { display: 'block', margin: '12px 0' } }, h('input', { type: 'checkbox', checked: update.auto, disabled: busy || !!update.storageError,
+          onChange: event => void action({ action: 'update_auto', enabled: event.target.checked }) }), ' 自动检查并在任务结束后更新'),
+        h('p', { style: { fontSize: '14px' } }, development ? reasons.development_check_only : update.mode !== 'managed' ? reasons.host_check_only :
+          '每 6 小时检查本插件的 GitHub 正式版本。更新等待碳硅任务结束，不会重启整个 DSH；保留绑定、人设、授权和预算。'),
+        update.reason && reasons[update.reason] && h('p', { role: 'status' }, reasons[update.reason]),
+        update.error && h('p', { role: 'alert' }, errors[update.error] || '此次更新未完成，可重试检查；具体状态见上方。'),
+        update.storageError && h('p', { role: 'alert' }, '更新设置未能保存，请检查本机插件更新状态文件；原文件保留。'),
+        h('button', { type: 'button', style: buttonStyle, disabled, onClick: () => void action({ action: 'update_check' }) }, update.blockedVersion ? '重新检查并重试' : '检查更新'),
+        h('a', { href: 'https://github.com/bzny/dsh-plugin-tangui/releases', target: '_blank', rel: 'noopener noreferrer' }, '查看发布说明'),
+        update.lastCheck && h('p', { style: { fontSize: '14px' } }, `上次检查：${new Date(update.lastCheck).toLocaleString()}`));
+    }
+
     function RuntimePanel({ state, action, busy }) {
+      busy = busy || state.updates?.state === 'installing';
       const [options, setOptions] = React.useState({ max_model_calls: 10, max_replies: 10, max_posts: 1, interval_seconds: 15, query: '' });
       const [posts, setPosts] = React.useState(false);
-      const [draft, setDraft] = React.useState({ title: '', body: '', topics: [] });
+      const [draft, setDraft] = React.useState(() => loadDraft('post', state) || { title: '', body: '', topics: [] });
+      const seenRejection = React.useRef(loadDraft('post', state) ? state.runtime?.rejected_draft?.key : null);
       const [since, setSince] = React.useState('');
       const [until, setUntil] = React.useState('');
       const [format, setFormat] = React.useState('json');
       const [exportPage, setExportPage] = React.useState(null);
+      useUpdateHold(!!(draft.title || draft.body || draft.topics.length));
       const runtime = state.runtime, connection = state.runtimeConnection;
       React.useEffect(() => {
-        if (runtime?.rejected_draft) setDraft({ title: runtime.rejected_draft.title || '', body: runtime.rejected_draft.body || '', topics: runtime.rejected_draft.topics || [] });
+        if (runtime?.rejected_draft && runtime.rejected_draft.key !== seenRejection.current) {
+          seenRejection.current = runtime.rejected_draft.key;
+          setDraft({ title: runtime.rejected_draft.title || '', body: runtime.rejected_draft.body || '', topics: runtime.rejected_draft.topics || [] });
+        }
       }, [runtime?.rejected_draft?.key]);
+      React.useEffect(() => { saveDraft('post', state, draft.title || draft.body || draft.topics.length ? draft : null); }, [draft]);
       if (!runtime || !connection) return h('p', { role: 'status' }, state.runtimeInitializationError || '当前服务尚未加载社区运行功能。');
       const validDraft = draft.title.trim() && [...draft.title.trim()].length <= 160 && draft.body.trim() && [...draft.body.trim()].length <= 10000 &&
         draft.topics.length <= 5 && draft.topics.every(topic => topic.trim() && [...topic.trim()].length <= 40);
@@ -84,7 +156,9 @@ window.__ModuleLoader__.load({
             onChange: e => setDraft(old => ({ ...old, body: e.target.value })) })),
           field('话题（逗号分隔，最多 5 个，每个 1 至 40 字；可留空）', draft.topics.join(','), value => setDraft(old => ({ ...old, topics: value ? value.split(/[,，]/) : [] }))),
           h('p', { style: { fontSize: '14px' } }, '按当前文字发表并标记为 AI 内容；不会自动添加私人聊天记录。'),
-          button('确认以上内容并发表', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending)),
+          button('确认以上内容并发表', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending),
+          h('button', { type: 'button', style: buttonStyle, disabled: busy || active || !!runtime.pending,
+            onClick: () => setDraft({ title: '', body: '', topics: [] }) }, '清空草稿')),
         connection.binding && h('details', null, h('summary', null, '导出社区动态'),
           field('开始时间（带时区，如 2026-10-28T00:00:00+08:00）', since, value => { setSince(value); setExportPage(null); }),
           field('结束时间（可留空）', until, value => { setUntil(value); setExportPage(null); }),
@@ -107,9 +181,14 @@ window.__ModuleLoader__.load({
       const descriptionDirty = React.useRef(false);
       const mounted = React.useRef(true);
       const discoveryAttempted = React.useRef(false);
+      useUpdateHold(edited);
       const assign = (data) => {
         setState(data);
-        if (!dirty.current) setForm({ platformUrl: data.platformUrl, memoryDir: data.memoryDir, draft: data.draft || { name: '', description: '', overrides: {} } });
+        if (!dirty.current) {
+          const saved = loadDraft('persona', data);
+          if (saved) { dirty.current = true; descriptionDirty.current = true; setEdited(true); setNotice('已恢复本标签页尚未保存的人设编辑。'); }
+          setForm(saved || { platformUrl: data.platformUrl, memoryDir: data.memoryDir, draft: data.draft || { name: '', description: '', overrides: {} } });
+        }
       };
       const refresh = async () => {
         try {
@@ -142,7 +221,11 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => { void refresh(); }, 5000);
         return () => { mounted.current = false; clearInterval(timer); };
       }, []);
-      const edit = (update) => { dirty.current = true; setEdited(true); setForm((old) => update(old)); };
+      const edit = (update) => { dirty.current = true; setEdited(true); setForm((old) => {
+        const value = update(old);
+        if (!saveDraft('persona', state, value)) setNotice('浏览器无法暂存编辑，请先关闭自动更新，保存后再继续。');
+        return value;
+      }); };
       const action = async (payload) => {
         setBusy(true); setError(''); setNotice('');
         try {
@@ -154,22 +237,27 @@ window.__ModuleLoader__.load({
           }
           const submittedEdits = payload.action === 'prepare' || (payload.action === 'sync' && payload.fresh && payload.draft)
             || (payload.action === 'configure' && payload.enabled === true);
-          if (submittedEdits) { dirty.current = false; descriptionDirty.current = false; setEdited(false); }
+          if (submittedEdits) { saveDraft('persona', state, null); saveDraft('persona', data, null); dirty.current = false; descriptionDirty.current = false; setEdited(false); }
           assign(data);
           if (payload.action === 'reconnect') {
             // Reconnecting only submits the destination. Keep unsaved persona
             // edits so changing community cannot silently restore full SOUL.
             setForm((old) => ({ ...old, platformUrl: data.platformUrl }));
+            if (dirty.current && form) {
+              saveDraft('persona', state, null);
+              saveDraft('persona', data, { ...form, platformUrl: data.platformUrl });
+            }
             setNotice('已切换，等待连接。请核对人设，再确认接入。');
           }
           return data;
         } catch (reason) { setError(reason.message); }
         finally { setBusy(false); }
       };
+      const updating = state?.updates?.state === 'installing';
       const field = (label, value, onChange, multiline = false, readOnly = false) => h('label', { style: { display: 'block', margin: '14px 0' } }, label,
-        h(multiline ? 'textarea' : 'input', { value: value || '', rows: multiline ? 12 : undefined, style: inputStyle, disabled: busy, readOnly,
+        h(multiline ? 'textarea' : 'input', { value: value || '', rows: multiline ? 12 : undefined, style: inputStyle, disabled: busy || updating, readOnly,
           onChange: (event) => onChange(event.target.value) }));
-      const button = (label, onClick, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || state?.busy || disabled, onClick }, label);
+      const button = (label, onClick, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || updating || state?.busy || disabled, onClick }, label);
       if (!state || !form) return h('div', { style: box }, error || '正在读取碳硅派对接入状态…');
       const sourceInput = { platformUrl: form.platformUrl, memoryDir: form.memoryDir,
         ...(form.memoryDir === state.memoryDir && descriptionDirty.current ? { description: form.draft.description } : {}) };
@@ -183,12 +271,13 @@ window.__ModuleLoader__.load({
         (error || state.error?.message) && h('p', { role: 'alert', style: { color: '#d54949' } }, error || state.error.message),
         notice && h('p', { role: 'status' }, notice),
         state.warning && h('p', { role: 'status' }, state.warning),
-        h(RuntimePanel, { state, action, busy }),
+        h(UpdatePanel, { update: state.updates, action, busy }),
+        h(RuntimePanel, { key: draftKey('post', state), state, action, busy }),
         field('社区地址', form.platformUrl, (value) => edit((old) => ({ ...old, platformUrl: value }))),
         !supportsConnectionSwitch && h('p', { role: 'status' }, 'DSH 服务尚未加载本次插件更新，请结束当前任务后通过原有启动器重新启动 DSH，再更换社区。仅刷新页面不会更新服务程序。'),
         field('长期记忆目录（自动识别，也可调整）', form.memoryDir, (value) => edit((old) => ({ ...old, memoryDir: value }))),
         state.memoryDiscovery?.status === 'needs_selection' && h('p', { role: 'status' }, '发现多个记忆目录，请明确选择要接入的伙伴：',
-          ...(state.memoryDiscovery.candidates || []).map((item) => h('button', { key: item.path, type: 'button', style: buttonStyle, disabled: busy || !!state.binding,
+          ...(state.memoryDiscovery.candidates || []).map((item) => h('button', { key: item.path, type: 'button', style: buttonStyle, disabled: busy || updating || !!state.binding,
             onClick: () => edit((old) => ({ ...old, memoryDir: item.path })) }, item.path))),
         h('p', { style: { fontSize: '14px' } }, '只读取 SOUL.md 和 BOOTSTRAP.md。下方选定的人设文本会发送给 DSH 默认模型；不附带用户画像、聊天记录或记忆日志，不使用文件与网络操作工具。'),
         h('h3', null, '将提交的资料'),
@@ -239,3 +328,4 @@ window.__ModuleLoader__.load({
     } };
   },
 });
+
