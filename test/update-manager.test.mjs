@@ -141,6 +141,65 @@ test('explicit check can defer install and auto false stops queued update', asyn
   m.setAuto(true); assert.equal((await m.tick()).state, 'updated');
 });
 
+test('manual install uses the displayed fixed candidate without enabling automatic updates', async () => {
+  const net = fixture(), host = hostFixture(), m = manager({ ...net, host: host.host, auto: false });
+  assert.equal(m.canInstall(), false);
+  assert.equal((await m.check({ install: false, manual: true })).reason, 'auto_disabled');
+  assert.equal(m.canInstall(), true); const calls = net.calls.length;
+  const result = await m.install({ version: '0.4.1', commit });
+  assert.equal(result.state, 'updated'); assert.equal(result.auto, false);
+  assert.equal(net.calls.length, calls); assert.equal(host.calls.filter(x => x === 'install').length, 1);
+  assert.equal(m.canInstall(), false);
+});
+
+test('manual install rejects stale targets and concurrent clicks without duplicate writes', async () => {
+  const host = hostFixture(), m = manager({ ...fixture(), host: host.host, auto: false });
+  assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_candidate_changed' });
+  await m.check({ install: false });
+  assert.throws(() => m.install({ version: '0.4.2', commit }), { code: 'update_candidate_changed' });
+  assert.throws(() => m.install({ version: '0.4.1', commit: '3'.repeat(40) }), { code: 'update_candidate_changed' });
+  assert.equal(host.calls.length, 0);
+  const first = m.install({ version: '0.4.1', commit });
+  assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_busy' });
+  await first; assert.equal(host.calls.filter(x => x === 'install').length, 1);
+});
+
+test('manual install respects active tasks and does not silently queue while auto is off', async () => {
+  let busy = true; const host = hostFixture({ tryAcquireIdleLock() { return busy ? null : () => {}; } });
+  const m = manager({ ...fixture(), host: host.host, auto: false });
+  await m.check({ install: false });
+  assert.equal((await m.install({ version: '0.4.1', commit })).state, 'waiting_idle');
+  assert.equal(host.calls.length, 0); busy = false;
+  await m.tick(); assert.equal(host.calls.length, 0);
+  assert.equal((await m.install({ version: '0.4.1', commit })).state, 'updated');
+});
+
+test('manual entry keeps development, unsupported-host and restart conditions intact', async () => {
+  for (const [mode, supported, reason] of [['development', true, 'development_check_only'], ['managed', false, 'host_check_only']]) {
+    const host = hostFixture(), m = manager({ ...fixture(), mode, host: supported ? host.host : null, auto: false });
+    await m.check({ install: false }); assert.equal(m.canInstall(), false);
+    assert.equal((await m.install({ version: '0.4.1', commit })).reason, reason);
+    assert.equal(host.calls.length, 0);
+  }
+  const host = hostFixture({ async install() { host.calls.push('install'); return { restartRequired: true }; } });
+  const m = manager({ ...fixture(), host: host.host, auto: false });
+  await m.check({ install: false }); await m.install({ version: '0.4.1', commit });
+  assert.equal(m.canInstall(), false);
+  assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_restart_required' });
+  assert.equal(host.calls.filter(x => x === 'install').length, 1);
+});
+
+test('failed manual install rolls back once and requires a new explicit check before retry', async () => {
+  const host = hostFixture({ async install() { host.calls.push('install'); throw Error('failed'); } });
+  const m = manager({ ...fixture(), host: host.host, auto: false });
+  await m.check({ install: false });
+  assert.equal((await m.install({ version: '0.4.1', commit })).state, 'rolled_back');
+  assert.equal(m.canInstall(), false);
+  assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_retry_requires_check' });
+  await m.check({ install: false, manual: true }); assert.equal(m.canInstall(), true);
+  assert.equal(host.calls.filter(x => x === 'install').length, 1);
+});
+
 test('asynchronous idle acquisition is not accepted as an installation lock', async () => {
   const host = hostFixture({ tryAcquireIdleLock: async () => () => {} });
   const result = await manager({ ...fixture(), host: host.host }).check();

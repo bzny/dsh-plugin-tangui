@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { resolve, join, sep } from 'node:path';
 import { apply } from '../lib/index.js';
+import { updateProfileKey } from '../lib/update-host.js';
 
 test('update settings use the DSH auth and origin checks and keep the normal plugin route usable', async t => {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
@@ -47,4 +48,45 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
   assert.equal((await request({ action: 'update_hold', clientId: 'browser-fixture', editing: true })).status, 200);
   assert.equal((await request({ action: 'update_hold', clientId: '../x', editing: true })).status, 400);
   assert.equal((await request({ action: 'discover' })).status, 200);
+
+  const target = { action: 'update_install', version: '0.4.99', commit: 'a'.repeat(40) };
+  assert.equal((await request(target, { 'x-fixture-session': '' })).status, 401);
+  assert.equal((await request(target, { origin: 'https://untrusted.example' })).status, 403);
+  assert.equal((await request({ ...target, commit: 'main' })).status, 400);
+  assert.equal((await request(target)).status, 409);
+
+  const coordinator = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')].get(updateProfileKey(root));
+  const calls = [];
+  coordinator.manager.mode = 'managed';
+  coordinator.manager.host = {
+    tryAcquireIdleLock: () => coordinator.gate.tryAcquireIdleLock(),
+    async snapshot() { calls.push('snapshot'); return {}; },
+    async install(value) { calls.push('install'); assert.equal(value.commit, target.commit); },
+    async activate() { calls.push('activate'); },
+    async getActiveVersion() { return target.version; },
+    async restore() { calls.push('restore'); },
+  };
+  const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+  globalThis.fetch = (url, options) => {
+    const path = String(url);
+    if (path.endsWith('/releases/latest')) return Promise.resolve(new Response(JSON.stringify({ draft: false, prerelease: false, tag_name: 'v0.4.99' })));
+    if (path.endsWith('/git/ref/tags/v0.4.99')) return Promise.resolve(new Response(JSON.stringify({ object: { type: 'commit', sha: target.commit } })));
+    if (path === `https://raw.githubusercontent.com/bzny/dsh-plugin-tangui/${target.commit}/package.json`) return Promise.resolve(new Response(JSON.stringify({ ...manifest, version: target.version })));
+    return nativeFetch(url, options);
+  };
+  coordinator.manager.fetchImpl = globalThis.fetch;
+  await request({ action: 'update_hold', clientId: 'browser-fixture', editing: false });
+  assert.equal((await request({ action: 'update_check' })).status, 200);
+  await coordinator.manager._operation;
+  state = await (await nativeFetch(endpoint, { headers: { 'x-fixture-session': 'yes' } })).json();
+  assert.equal(state.updates.manualInstall, true); assert.equal(state.updates.canInstall, true);
+  assert.equal(state.updates.auto, false);
+  const stale = await request({ ...target, commit: 'b'.repeat(40) }); assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error.code, 'update_candidate_changed');
+  assert.equal(calls.length, 0);
+  assert.equal((await request(target)).status, 200);
+  await coordinator.manager._operation;
+  state = await (await nativeFetch(endpoint, { headers: { 'x-fixture-session': 'yes' } })).json();
+  assert.equal(state.updates.state, 'updated'); assert.equal(state.updates.current, '0.4.99');
+  assert.equal(state.updates.auto, false); assert.deepEqual(calls, ['snapshot', 'install', 'activate']);
 });

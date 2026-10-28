@@ -97,3 +97,82 @@ test('settings card switch remembers this browser preference while AI is running
   assert.equal(toggle.props.checked, false);
   toggle.props.onChange({ target: { checked: true } }); assert.equal(storage.get('tangui-management-card-visible'), 'on');
 });
+
+const updateCandidate = { version: '0.4.5', commit: 'a'.repeat(40), tag: 'v0.4.5',
+  url: 'https://github.com/bzny/dsh-plugin-tangui/releases/tag/v0.4.5' };
+async function renderUpdatePanel(overrides = {}, busy = false) {
+  const state = fixture();
+  state.updates = { ...state.updates, current: '0.4.4', latest: '0.4.5', state: 'available',
+    manualInstall: true, canInstall: true, candidate: updateCandidate, ...overrides };
+  const ui = page(new Map(), state), section = await renderSection(ui);
+  const component = find(section, node => typeof node.type === 'function' && node.type.name === 'UpdatePanel');
+  assert.ok(component);
+  const calls = [];
+  const tree = ui.mount(component.type, { ...component.props, update: state.updates,
+    action: value => calls.push(JSON.parse(JSON.stringify(value))), busy }).render();
+  return { tree, calls, state };
+}
+function immediateUpdate(tree) {
+  return find(tree, node => node.type === 'button' && node.children.some(child => typeof child === 'string' && child.includes('立即更新')));
+}
+function visibleText(node) {
+  if (typeof node === 'string') return node;
+  return (node?.children || []).map(visibleText).join(' ');
+}
+
+test('manual update submits the displayed immutable candidate even with automatic updates off', async () => {
+  const { tree, calls, state } = await renderUpdatePanel({ auto: false, reason: 'auto_disabled' });
+  const button = immediateUpdate(tree);
+  assert.ok(button); assert.ok(!button.props.disabled);
+  assert.ok(visibleText(button).includes('v0.4.5'));
+  button.props.onClick();
+  assert.deepEqual(calls, [{ action: 'update_install', version: '0.4.5', commit: 'a'.repeat(40) }]);
+  assert.equal(state.updates.auto, false);
+  assert.match(visibleText(tree), /自动更新已关闭，可点击立即更新完成本次安装/);
+  assert.ok(find(tree, node => node.type === 'button' && node.children.includes('检查更新')));
+});
+
+test('checking, installing, pending restart and busy UI cannot launch another installation', async t => {
+  for (const state of ['checking', 'installing', 'restarting_needed']) {
+    await t.test(state, async () => {
+      const { tree, calls } = await renderUpdatePanel({ state, canInstall: false });
+      const button = immediateUpdate(tree); assert.ok(!button || button.props.disabled);
+      button?.props.onClick(); assert.equal(calls.length, 0);
+      assert.doesNotMatch(visibleText(tree), /来源、宿主或候选尚不可安装/);
+    });
+  }
+  const { tree } = await renderUpdatePanel({}, true);
+  const button = immediateUpdate(tree); assert.ok(!button || button.props.disabled);
+});
+
+test('development, unsupported hosts and dependency changes stay check-only', async t => {
+  for (const options of [
+    { mode: 'development', installation: 'development-source', reason: 'development_check_only', canInstall: false },
+    { mode: 'managed', reason: 'host_check_only', canInstall: false },
+    { state: 'error', error: 'manual_required_dependencies', candidate: null, canInstall: false },
+  ]) {
+    await t.test(options.reason || options.error, async () => {
+      const { tree } = await renderUpdatePanel(options);
+      const button = immediateUpdate(tree); assert.ok(!button || button.props.disabled);
+      assert.match(visibleText(tree), /手动|开发源码/);
+    });
+  }
+});
+
+test('older service and missing candidates never offer an enabled new action', async () => {
+  const old = await renderUpdatePanel({ manualInstall: undefined });
+  const oldButton = immediateUpdate(old.tree); assert.ok(!oldButton || oldButton.props.disabled);
+  oldButton?.props.onClick(); assert.equal(old.calls.length, 0);
+  assert.match(visibleText(old.tree), /尚未|旧版/);
+  for (const candidate of [null, { version: '0.4.5' }, { commit: 'a'.repeat(40) }]) {
+    const { tree } = await renderUpdatePanel({ candidate });
+    const button = immediateUpdate(tree); assert.ok(!button || button.props.disabled);
+  }
+});
+
+test('busy installation tells manual and automatic users the correct next step', async () => {
+  const manual = await renderUpdatePanel({ state: 'waiting_idle', reason: 'runtime_busy', auto: false });
+  assert.match(visibleText(manual.tree), /再.*点击|再次.*更新/);
+  const automatic = await renderUpdatePanel({ state: 'waiting_idle', reason: 'runtime_busy', auto: true });
+  assert.match(visibleText(automatic.tree), /自动更新|自动安装/);
+});

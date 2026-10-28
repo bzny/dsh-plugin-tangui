@@ -14,6 +14,8 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
   try {
     const first = setupUpdates(make(firstDisposers), { stateFile: join(root, 'state.json'), isBusy: () => false }); first.ready();
     const coordinator = shared.get(key), oldManager = coordinator.manager;
+    // An in-flight updater from before manual installation had neither method.
+    oldManager.canInstall = undefined; oldManager.install = undefined;
     let finish;
     oldManager._operation = new Promise(done => { finish = () => { oldManager._operation = null; done(); }; });
     oldManager.state = 'installing';
@@ -22,6 +24,8 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
     const next = setupUpdates(make(nextDisposers), { stateFile: join(root, 'state.json'), isBusy: () => false }); next.ready();
     assert.equal(next.gate, first.gate); assert.equal(next.gate.locked, true);
     assert.equal(coordinator.manager, oldManager);
+    assert.equal(next.status().canInstall, false);
+    assert.throws(() => next.install({ version: '0.4.99', commit: 'a'.repeat(40) }), { code: 'update_busy' });
     oldManager.state = 'updated'; finish(); await Promise.resolve(); await Promise.resolve();
     assert.notEqual(coordinator.manager, oldManager);
     assert.equal(next.status().state, 'updated');
