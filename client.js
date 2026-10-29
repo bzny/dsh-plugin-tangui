@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
     function activitySummary(state) {
       const entry = state.modelLogs?.at(-1);
       const runtime = state.runtime || {};
-      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记' }[entry?.purpose] || '模型调用';
+      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记', post_draft: '起草帖子' }[entry?.purpose] || '模型调用';
       const stage = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '模型调用失败', cancelled: '调用已停止', timed_out: '模型等待超时' }[entry?.phase] || '处理中';
       const stageTone = { waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' }[entry?.phase] || 'blue';
       const outcome = [runtime.last_model_call, state.lastGameModelCall].find(row => row?.call_id === entry?.call_id);
@@ -81,6 +81,23 @@ window.__ModuleLoader__.load({
       };
     }
 
+    // Draft reminder presentation supplied by KIMI; runtime data wiring by Codex.
+function DraftReviewReminder({source}) {
+  const h = React.createElement;
+  if (!source || !Number.isInteger(source.pending_count) || source.pending_count <= 0) return null;
+  let href = null;
+  try {
+    const url = new URL(source.review_link);
+    if (url.protocol === 'http:' || url.protocol === 'https:') href = url.href;
+  } catch (_) {}
+  return h('div', {
+    style: {display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 10px', color: 'inherit', fontSize: '14px', lineHeight: '1.5'}
+  },
+    h('span', null, '有' + source.pending_count + '份发帖草稿待你确认'),
+    href ? h('a', {href, target: '_blank', rel: 'noopener noreferrer', style: {color: 'inherit', fontWeight: 600}}, '打开网站审核') : null,
+    h('span', {style: {opacity: 0.75}}, '最终发表需在网站确认')
+  );
+}
     function ManagementCard({ sessionId }) {
       const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
@@ -142,6 +159,8 @@ window.__ModuleLoader__.load({
         state && !state.managementSession && h('p', null, '请在任务结束后重启 DSH，以加载会话动态功能。'),
         state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
         error && h('p', { role: 'status', style: { color: '#bd6d19', margin: '5px 0' } }, error),
+        here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
+        here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
         here && summary && h('div', null,
           h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
           h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
@@ -511,7 +530,7 @@ window.__ModuleLoader__.load({
 
     function ModelCallsPanel({ state }) {
       const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
-      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记' };
+      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记', post_draft: '起草帖子' };
       const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
       const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
       const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
@@ -596,7 +615,7 @@ window.__ModuleLoader__.load({
           ...[['max_model_calls', '社区与日记累计模型调用上限'], ['interval_seconds', '持续观察间隔（秒，至少 3 秒）']].map(([key, name]) =>
             h('div', { key }, field(name, options[key], value => setOptions(old => ({ ...old, [key]: value })), 'number'))),
           h('p', null, '回复数量、主动参与、浏览关键词、安静时段和自动接受游戏邀请统一在网站设置。')),
-        h('p', { style: { fontSize: '14px' } }, runtime.preferences?.community?.configured === true ? '网站行为设置已确认，旧本地回复／发帖额度和关键词不再生效。本地模型预算仍保留。' : '请到网站确认一次社区行为设置。在确认前保留旧本地回复／发帖额度和关键词，网站暂停及自主发帖开关仍有效；只设置日记不会解除旧限额。'),
+        h('p', { style: { fontSize: '14px' } }, runtime.preferences?.community?.configured === true ? '网站行为设置已确认，旧本地回复／发帖额度不再生效；兴趣不筛掉新帖。本地模型预算仍保留。' : '请到网站确认一次社区行为设置。在确认前保留旧本地回复／发帖额度，网站暂停及主动起草开关仍有效；只设置日记不会解除旧限额。'),
         button('浏览一次', { action: 'runtime_single', ...options }, active || !connection.binding),
         button('持续观察', { action: 'runtime_watch', ...options }, active || !connection.binding),
         button(runtime.stopping ? '正在停止…' : '停止运行', { action: 'runtime_stop' }, !active || runtime.stopping),
@@ -615,7 +634,7 @@ window.__ModuleLoader__.load({
           field('话题（逗号分隔，最多 5 个，每个 1 至 40 字；可留空）', draft.topics.join(','), value => setDraft(old => ({ ...old, topics: value ? value.split(/[,，]/) : [] }))),
           h('p', { style: { fontSize: '14px' } }, '先保存到网站草稿，人类确认后才会发表。不自动添加私人聊天记录。'),
           button('送到网站确认', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending),
-          runtime.post_draft?.id && h('p', null, h('a', { href: `${state.platformUrl}/manage#post-drafts`, target: '_blank', rel: 'noopener noreferrer' }, '查看待确认草稿')),
+          runtime.post_draft?.id && h('p', null, h('a', { href: runtime.post_draft.confirmation_url || `${state.platformUrl}/messages#post-drafts`, target: '_blank', rel: 'noopener noreferrer' }, '查看待确认草稿')),
           h('button', { type: 'button', style: buttonStyle, disabled: busy || active || !!runtime.pending,
             onClick: () => setDraft({ title: '', body: '', topics: [] }) }, '清空草稿')),
         runtime.diary && h('details', null, h('summary', null, '碳硅本地经历与日记'),

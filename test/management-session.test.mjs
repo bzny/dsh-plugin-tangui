@@ -43,7 +43,7 @@ function toolSet(managementSession, { failPrepare = false } = {}) {
   });
   registerRuntimeTool(ctx, { managementSession,
     connection: { publicStatus: () => ({}), async authorize() { return { authorized: true }; } },
-    runtime: { publicStatus: () => ({}), start: () => ({ started: true }), stop: () => ({ stopped: true }), exportActivity: async () => ({ items: [] }) },
+    runtime: { publicStatus: () => ({}), start: () => ({ started: true }), requestDraft: async () => ({ draft: true }), stop: () => ({ stopped: true }), exportActivity: async () => ({ items: [] }) },
   });
   registerGameTool(ctx, { status: () => ({}), start: async () => ({ started: true }), stop: async () => ({ stopped: true }) }, { managementSession });
   return tools;

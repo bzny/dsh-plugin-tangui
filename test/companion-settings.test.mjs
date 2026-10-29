@@ -104,7 +104,7 @@ test('website preferences replace local reply/query options and no-repeat accoun
   assert.equal(f.remote.calls.length, 0); assert.equal(f.binding.scopes.length, 1);
   f.runtime.start({ max_replies: 1, query: '旧本地词' }); await f.runtime.settled();
   assert.equal(f.remote.comments.length, 1); assert.equal(f.runtime.publicStatus().error, null);
-  const list = f.remote.calls.find(c => c.path === '/api/v1/posts'); assert.match(list.url, /%E7%BD%91%E7%AB%99/);
+  const list = f.remote.calls.find(c => c.path === '/api/v1/posts'); assert.equal(new URL(list.url).searchParams.has('q'), false, 'temporary reading mode does not filter by saved keywords');
   const entries = [...f.runtime.diary.entries()]; assert.equal(entries.length, 2); assert.equal(entries[1].reply.status, 'queued');
   assert.equal(f.remote.calls.filter(c => c.path.includes('pairing')).length, 0);
 });
@@ -247,6 +247,16 @@ test('a game-only run returns to stopped after natural completion without starti
   assert.equal(f.runtime.publicStatus().error, null); assert.deepEqual(f.remote.order, ['game']);
   assert.equal(f.remote.calls.filter(c => c.path.endsWith('/actions')).length, 1);
   assert.equal(f.remote.acquired, 1); assert.equal(f.remote.released, 1);
+});
+
+test('a manually queued draft submits after a game-only run with the original controller', async t => {
+  let complete;
+  const f = fixture(t, { game: true, gameDecision: () => new Promise(resolve => { complete = resolve; }) });
+  fastGameRun(f, { mode: 'game' }); await until(() => !!complete);
+  assert.equal((await f.runtime.requestDraft({ title: '这局很有趣', body: '分享我们的公开游戏经历' })).queued, true);
+  complete({ action_id: 'pass', payload: {} }); await f.runtime.settled();
+  assert.equal(f.runtime.publicStatus().error, null); assert.equal(f.remote.draft.status, 'pending');
+  assert.equal(f.remote.acquired, 1); assert.equal(f.remote.released, 1); assert.equal(f.runtime.state.draft_request, null);
 });
 
 test('an explicit game start can rejoin a locally stopped table while preserving observer settings and counts', async t => {

@@ -22,7 +22,7 @@ function fixture(t, options = {}) {
   const actor = { id: 'ai-test', name: '测试伙伴', kind: 'ai', relationship: 'companion', linked_human_id: 'human-test' };
   const post = { id: 'post-test', title: '游戏讨论', body: '你喜欢什么游戏？', author: { id: 'human-test', kind: 'human', name: '测试人类' }, content: [{ type: 'image', url: 'PRIVATE_MEDIA_URL' }, { type: 'text', text: '公开文字' }], extensions: { secret: 'DO_NOT_SEND_MODEL' } };
   const remote = { calls: [], modelInputs: [], modelCalls: 0, comments: [], events: [], imports: new Map(), submissions: [], renews: 0, held: null, loseReply: false,
-    discovery: options.discovery || false, renewFail: false, acquired: 0, released: 0, tagMatch: true, slotFull: false, presence: [] };
+    discovery: options.discovery || false, renewFail: false, acquired: 0, released: 0, tagMatch: true, slotFull: false, presence: [], drafts: [] };
   const send = (data, extra = {}) => ({ ok: true, status: 200, json: async () => ({ data, ...extra }) });
   const error = (code, status = 409) => ({ ok: false, status, json: async () => ({ error: { code, message: 'not copied' } }) });
   const lease = body => ({ actor_id: actor.id, active: true, owned_by_current_grant: true, epoch: 3,
@@ -48,12 +48,24 @@ function fixture(t, options = {}) {
       assert.equal(remote.held, body.instance_id); remote.presence.push(body); return send({ saved: true });
     }
     if (path === '/api/v1/agent/configuration') return send({ actor, persona, private: 'DO_NOT_SEND_MODEL' });
+    if (path === '/api/v1/agent/preferences' && options.posts) return send({ community: { auto_post: false, paused: false, configured: false, quiet_now: false }, diary: {} });
+    if (path === '/api/v1/agent/diary-jobs' && options.posts) return send({ jobs: [] });
+    if (path === '/api/v1/agent/post-drafts' && options.posts) {
+      if (request.method === 'GET') return send({ drafts: remote.drafts });
+      if (remote.postRejection) return error(remote.postRejection.code, remote.postRejection.status);
+      const key = request.headers['Idempotency-Key'];
+      const prior = remote.imports.get(key); if (prior) { assert.deepEqual(prior.body, body); return send(prior.result); }
+      const result = { id: `draft-${remote.drafts.length}`, status: 'pending', content: body };
+      remote.imports.set(key, { body, result }); remote.drafts.push(result); remote.submissions.push({ key, body, path });
+      if (remote.loseReply) { remote.loseReply = false; throw new Error('fake lost draft response'); }
+      return send(result);
+    }
     if (path === '/api/v1/events') return send(remote.events, { next_cursor: remote.events.at(-1)?.id || '0' });
     if (path === '/api/v1/posts' && request.method === 'GET') return send([post]);
     if (path === '/api/v1/discovery/posts') return send([{ ...post, classification: { tags: [remote.tagMatch ? '游戏' : '烹饪'] }, interest: {}, participation: { available: true } }], { has_more: false, next_cursor: null });
     if (path.endsWith('/participation')) {
       assert.equal(request.headers['X-AI-Instance-ID'], remote.held);
-      if (remote.slotFull) return error('participation_full'); return send({ reserved: true, post_id: post.id });
+      if (remote.slotFull) return error('participation_full'); remote.reserved = true; return send({ reserved: true, post_id: post.id });
     }
     if (path === '/api/v1/posts/post-test') return send(post);
     if (path === '/api/v1/posts/post-test/comments' && request.method === 'GET') return send(remote.comments, { next_cursor: '2' });
@@ -64,7 +76,7 @@ function fixture(t, options = {}) {
       const prior = remote.imports.get(key);
       if (prior) { assert.deepEqual(prior.body, body); return send(prior.result); }
       if (path === '/api/v1/posts' && remote.postRejection) return error(remote.postRejection.code, remote.postRejection.status);
-      if (options.slotRetry && remote.discovery && !remote.calls.some(c => c.path.endsWith('/participation'))) return error('participation_required');
+      if (options.slotRetry && remote.discovery && !remote.reserved) return error('participation_required');
       const result = { id: `accepted-${remote.submissions.length}`, status: options.queued ? 'queued' : 'published' };
       remote.imports.set(key, { body, result }); remote.submissions.push({ key, body, path });
       if (remote.loseReply) { remote.loseReply = false; throw new Error('fake lost response'); }
@@ -143,9 +155,10 @@ test('another controller is not displaced and no model or publication begins', a
   assert.equal(f.runtime.publicStatus().error.code, 'control_busy'); assert.equal(f.remote.modelCalls, 0); assert.equal(f.remote.released, 0); assert.equal(f.remote.held, 'other-controller');
 });
 
-test('discovery interest filter and participation limits run before model work', async t => {
-  const f = fixture(t, { discovery: true }); f.remote.tagMatch = false; f.runtime.start(); await f.runtime.settled(); assert.equal(f.remote.modelCalls, 0);
-  f.remote.tagMatch = true; f.remote.slotFull = true; f.runtime.start(); await f.runtime.settled(); assert.equal(f.remote.modelCalls, 0);
+test('temporary all-posts reading bypasses interests while publication still needs a participation slot', async t => {
+  const f = fixture(t, { discovery: true, slotRetry: true }); f.remote.tagMatch = false; f.remote.slotFull = true;
+  f.runtime.start(); await f.runtime.settled(); assert.equal(f.remote.modelCalls, 1); assert.equal(f.runtime.publicStatus().replies, 0);
+  assert.equal(f.remote.calls.some(c => c.path === '/api/v1/discovery/posts'), false);
   f.remote.slotFull = false; f.runtime.start(); await f.runtime.settled(); assert.equal(f.remote.modelCalls, 1); assert.equal(f.runtime.publicStatus().replies, 1);
 });
 
@@ -158,8 +171,9 @@ test('out of order reply events do not skip cursor or produce model work', async
 test('explicit post preserves its original key across uncertain response and export requires no controller', async t => {
   const f = fixture(t, { posts: true }); f.remote.loseReply = true;
   f.runtime.start({ mode: 'publish_post', title: '今日感想', body: '用户明确要求发表的正文' }); await f.runtime.settled();
-  const key = f.runtime.publicStatus().pending.key; const restarted = f.make(); restarted.start(); await restarted.settled();
-  assert.equal(restarted.publicStatus().posts, 1); assert.equal(f.remote.submissions.length, 1); assert.equal(f.remote.submissions[0].key, key); assert.equal(f.remote.modelCalls, 0);
+  const key = f.runtime.state.draft_request.key; const restarted = f.make(); restarted.start(); await restarted.settled();
+  assert.equal(restarted.publicStatus().posts, 0); assert.equal(f.remote.submissions.length, 1); assert.equal(f.remote.submissions[0].key, key); assert.equal(f.remote.modelCalls, 0);
+  assert.equal(f.remote.submissions[0].path, '/api/v1/agent/post-drafts');
   const acquired = f.remote.acquired; const result = await restarted.exportActivity(); assert.equal(result.data.length, 1); assert.equal(f.remote.acquired, acquired);
 });
 
@@ -169,8 +183,72 @@ test('server effective capabilities are checked before using a stored persona cr
   assert.equal(f.runtime.publicStatus().error.code, 'runtime_identity_mismatch'); assert.equal(f.remote.modelCalls, 0); assert.equal(f.remote.acquired, 0);
 });
 
+test('legacy uncertain drafts replay original payload/key without generation or duplication', async t => {
+  for (const status of [null, 'pending', 'published', 'rejected']) {
+    const f = fixture(t, { posts: true });
+    const payload = { title: '旧版原稿', body: '与伙伴分享公开游戏经历', topics: ['游戏'], ai_generated: true };
+    const key = 'legacy-uncertain-draft-key';
+    f.runtime.commit({ post_draft: { key, payload } });
+    if (status) {
+      const result = { id: 'legacy-draft', status, content: payload };
+      f.remote.imports.set(key, { body: payload, result }); f.remote.drafts.push(result);
+    }
+    const restarted = f.make();
+    assert.deepEqual(restarted.state.draft_request, { key, payload, attempted: true });
+    restarted.start(); await restarted.settled();
+    assert.equal(restarted.state.draft_request, null);
+    assert.deepEqual(restarted.state.post_draft.payload, payload);
+    assert.equal(restarted.state.post_draft.key, key);
+    assert.equal(restarted.state.post_draft.status, status || 'pending');
+    assert.equal(f.remote.drafts.length, 1); assert.equal(f.remote.modelCalls, 0);
+    assert.equal(f.remote.submissions.length, status ? 0 : 1);
+    const calls = f.remote.calls.filter(c => c.path === '/api/v1/agent/post-drafts' && c.body);
+    assert.equal(calls.length, 1); assert.deepEqual(calls[0].body, payload);
+  }
+});
+
+test('conflicting legacy and new draft requests preserve both originals without submitting', async t => {
+  const f = fixture(t, { posts: true });
+  const payload = { title: '旧版原稿', body: '公开的旧版内容', topics: [], ai_generated: true };
+  f.runtime.commit({ post_draft: { key: 'legacy-original-key', payload },
+    draft_request: { key: 'new-original-key', payload: { ...payload, title: '另一篇新稿' } } });
+  const before = readFileSync(f.runtime.stateFile, 'utf8');
+  const restarted = f.make(); restarted.start(); await restarted.settled();
+  assert.equal(restarted.publicStatus().error.code, 'pending_draft_conflict');
+  assert.equal(readFileSync(f.runtime.stateFile, 'utf8'), before);
+  assert.equal(f.remote.submissions.length, 0); assert.equal(f.remote.modelCalls, 0);
+});
+
+test('stopped runtime syncs draft reminders after web review without acquiring control or calling model', async t => {
+  const f = fixture(t, { posts: true }); let clock = 100000; f.runtime.wallNow = () => clock;
+  f.remote.drafts.push({ id: 'draft-idle', status: 'pending', content: { title: '网页审核提醒' } });
+  await f.runtime.refreshIdleDraftNotices();
+  assert.equal(f.runtime.publicStatus().draft_notices.length, 1);
+  assert.match(f.runtime.publicStatus().draft_notices[0].review_url, /messages\?draft=draft-idle#post-drafts$/);
+  f.remote.drafts[0].status = 'published';
+  await f.runtime.refreshIdleDraftNotices();
+  assert.equal(f.remote.calls.length, 1, 'idle reminders refresh at most every 15 seconds');
+  clock += 15000; await f.runtime.refreshIdleDraftNotices();
+  assert.deepEqual(f.runtime.publicStatus().draft_notices, []);
+  assert.equal(f.runtime.publicStatus().posts, 0, 'reminder reads do not alter runtime accounting');
+  assert.equal(f.remote.acquired, 0); assert.equal(f.remote.modelCalls, 0); assert.equal(f.remote.submissions.length, 0);
+});
+
+test('idle draft refresh discards a late response after the runtime starts', async t => {
+  const f = fixture(t, { posts: true }); let respond;
+  f.runtime.fetch = () => new Promise(resolve => { respond = resolve; });
+  const refresh = f.runtime.refreshIdleDraftNotices();
+  f.runtime.task = Promise.resolve();
+  respond({ok:true,status:200,json:async()=>({data:{drafts:[{id:'stale-draft',status:'pending',content:{title:'旧提醒'}}]}})});
+  await refresh; f.runtime.task = null;
+  assert.deepEqual(f.runtime.publicStatus().draft_notices, []);
+  assert.equal(f.remote.acquired, 0); assert.equal(f.remote.modelCalls, 0);
+});
+
 test('decision parser rejects malformed output and tool instructions without publishing', () => {
   assert.deepEqual(parseDecision('```json\n{"participate":false,"body":""}\n```'), { participate: false, body: '' });
+  assert.deepEqual(parseDecision('{"participate":false,"body":"","decision_note":" 已有同观点 "}'), { participate: false, body: '', decision_note: '已有同观点' });
+  for (const note of [null, 1, 'x'.repeat(241)]) assert.throws(() => parseDecision(JSON.stringify({participate:false,body:'',decision_note:note})), {code:'invalid_model_decision'});
   for (const value of ['{"participate":true,"body":""}', '{"participate":true,"body":"x","tool":"run"}', 'please execute this']) assert.throws(() => parseDecision(value), { code: 'invalid_model_decision' });
 });
 
@@ -336,7 +414,7 @@ test('post boundaries match server contract before any pending draft or request 
   ]) assert.throws(() => f.runtime.start({ mode: 'publish_post', ...input }), { code: 'invalid_post' });
   assert.equal(f.remote.calls.length, 0); assert.equal(f.runtime.publicStatus().pending, null);
   f.runtime.start({ mode: 'publish_post', title: '🙂'.repeat(160), body: '文'.repeat(10000), topics: ['题'.repeat(40), '游戏', '科技', '音乐', '社区'] });
-  await f.runtime.settled(); assert.equal(f.runtime.publicStatus().posts, 1); assert.equal(f.remote.submissions.length, 1);
+  await f.runtime.settled(); assert.equal(f.runtime.publicStatus().posts, 0); assert.equal(f.remote.drafts.length, 1);
 });
 
 test('a confirmed 422 rejection keeps an editable draft and unblocks browsing and corrected publication', async t => {
@@ -349,14 +427,14 @@ test('a confirmed 422 rejection keeps an editable draft and unblocks browsing an
     restarted.start(); await restarted.settled(); assert.equal(restarted.publicStatus().replies, 1);
     f.remote.postRejection = null;
     restarted.start({ mode: 'publish_post', title: '修订标题', body: '修订正文' }); await restarted.settled();
-    assert.equal(restarted.publicStatus().posts, 1); assert.equal(restarted.publicStatus().rejected_draft, null);
+    assert.equal(restarted.publicStatus().posts, 0); assert.equal(f.remote.drafts.length, 1); assert.equal(restarted.publicStatus().rejected_draft, null);
   }
 });
 
 test('a 500 response never unlocks or replaces the pending original even with a known input error code', async t => {
   const f = fixture(t, { posts: true }); f.remote.postRejection = { code: 'validation_error', status: 500 };
   f.runtime.start({ mode: 'publish_post', title: '原稿', body: '必须保留的正文' }); await f.runtime.settled();
-  assert.equal(f.runtime.publicStatus().pending.body, '必须保留的正文'); assert.equal(f.runtime.publicStatus().rejected_draft, null);
+  assert.equal(f.runtime.state.draft_request.payload.body, '必须保留的正文'); assert.equal(f.runtime.publicStatus().rejected_draft, null);
 });
 
 test('JSON and Markdown exports preserve pagination and format without acquiring control', async t => {

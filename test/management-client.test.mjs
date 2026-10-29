@@ -18,7 +18,7 @@ function page(initial, sessionId = 'session-current', visible = true) {
       if (!old || deps.some((v, n) => v !== old.deps[n])) owner.effects.push(() => { old?.cleanup?.(); owner.hooks[i] = { deps, cleanup: effect() }; }); },
   };
   vm.runInNewContext(readFileSync('client.js', 'utf8'), {
-    window: { __ModuleLoader__: { load(v) { factory = v.factory; } },
+    URL, window: { __ModuleLoader__: { load(v) { factory = v.factory; } },
       addEventListener(name, callback) { if (name === 'storage') storageListeners.add(callback); },
       removeEventListener(name, callback) { if (name === 'storage') storageListeners.delete(callback); } }, AbortController,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
@@ -52,6 +52,17 @@ function find(node, predicate) { if (!node || typeof node !== 'object') return n
 const button = (tree, label) => find(tree, n => n.type === 'button' && text(n) === label);
 const fixture = () => ({ managementSession: { sessionId: null }, binding: { actorName: '测试伙伴' }, modelLogs: [],
   runtime: { state: 'stopped', running: false, model_calls: 2, replies: 1, posts: 0 } });
+
+test('management conversation reminder links to the exact pending draft with no publish action', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.draft_notices = [{ id: 'draft-fixture', review_url: 'https://community.example/messages?draft=draft-fixture#post-drafts' }];
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const component = find(tree, n => typeof n.type === 'function' && n.type.name === 'DraftReviewReminder');
+  assert.ok(component); const reminder = component.type(component.props);
+  assert.match(text(reminder), /1份发帖草稿/); assert.match(text(reminder), /最终发表需在网站确认/);
+  assert.equal(find(reminder, n => n.type === 'a').props.href, state.runtime.draft_notices[0].review_url);
+  assert.equal(find(reminder, n => n.type === 'button'), null);
+});
 
 test('chat polling is read-only until the human selects this session; updates reuse one card', async () => {
   const ui = page(fixture()); ui.render(); let tree = await ui.settle();
