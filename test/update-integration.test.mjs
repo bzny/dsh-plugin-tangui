@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { setupUpdates } from '../lib/update-integration.js';
 import { updateProfileKey } from '../lib/update-host.js';
 
-async function withScheduledUpdates(t, now, initialState, run) {
+async function withScheduledUpdates(t, now, initialState, run, createAdapter) {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, 'update-schedule-')), disposers = [];
   const shared = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')];
@@ -14,7 +14,7 @@ async function withScheduledUpdates(t, now, initialState, run) {
   try {
     writeFileSync(join(root, 'plugin-update.json'), JSON.stringify(initialState));
     const updates = setupUpdates({ effect(setup) { disposers.push(setup()); } },
-      { stateFile: join(root, 'state.json'), isBusy: () => false });
+      { stateFile: join(root, 'state.json'), isBusy: () => false, ...(createAdapter ? { createAdapter } : {}) });
     updates.ready();
     const manager = shared.get(key).manager, calls = [];
     manager.fetchImpl = async url => {
@@ -59,6 +59,18 @@ test('auto disabled prevents both startup and interval checks', async t => {
   });
 });
 
+test('normal startup timer refreshes a late host without requiring a manual click', async t => {
+  let available = false;
+  const host = {};
+  await withScheduledUpdates(t, Date.parse('2026-10-29T10:00:00+08:00'), {}, async ({ updates, manager, calls }) => {
+    assert.equal(updates.status().installation, 'reload-unavailable');
+    available = true;
+    t.mock.timers.tick(2000); await manager._operation;
+    assert.equal(updates.status().mode, 'managed'); assert.equal(updates.status().installation, null);
+    assert.equal(manager.host, host); assert.equal(calls.length, 1);
+  }, () => available ? { mode: 'managed', reason: null, host } : { mode: 'check-only', reason: 'reload-unavailable', host: null });
+});
+
 test('HMR waits for the old update, retains the gate, then adopts new updater code', async () => {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, 'update-lifecycle-'));
@@ -87,6 +99,75 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
     next.setAuto(false); assert.equal(next.status().auto, false);
   } finally {
     nextDisposers.forEach(dispose => dispose()); shared.delete(key);
+    assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
+  }
+});
+
+test('late DSH update service recovers on manual check and installs with the same idle gate', async () => {
+  const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'update-late-host-')), disposers = [];
+  const shared = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')], key = updateProfileKey(root);
+  let available = false, activeVersion, constructions = 0;
+  const calls = [];
+  try {
+    const updates = setupUpdates({ effect(setup) { disposers.push(setup()); } }, {
+      stateFile: join(root, 'state.json'), isBusy: () => false,
+      createAdapter(_ctx, options) {
+        constructions++;
+        if (!available) return { mode: 'check-only', reason: 'reload-unavailable', profileDir: root, host: null };
+        return { mode: 'managed', reason: null, profileDir: root, host: {
+          tryAcquireIdleLock: options.tryAcquireIdleLock,
+          async snapshot() { calls.push('snapshot'); assert.equal(updates.gate.locked, true); return {}; },
+          async install(target) { calls.push('install'); activeVersion = target.version; },
+          async activate() { calls.push('activate'); },
+          getActiveVersion() { return activeVersion; }, async restore() { calls.push('restore'); },
+        } };
+      },
+    });
+    updates.ready();
+    assert.equal(updates.status().installation, 'reload-unavailable');
+    assert.equal(updates.status().mode, 'check-only');
+    const manager = shared.get(key).manager, baseline = manager.currentManifest;
+    const version = `${Number(baseline.version.split('.')[0]) + 1}.0.0`, commit = 'a'.repeat(40);
+    manager.fetchImpl = async url => new Response(JSON.stringify(url.endsWith('/releases/latest') ?
+      { draft: false, prerelease: false, tag_name: `v${version}` } : url.includes('/git/ref/tags/') ?
+      { object: { type: 'commit', sha: commit } } : { ...baseline, version }));
+    updates.check(); await manager._operation;
+    assert.equal(updates.status().reason, 'host_check_only');
+    assert.equal(JSON.parse(readFileSync(join(root, 'plugin-update.json'), 'utf8')).installation, 'reload-unavailable');
+    available = true;
+    updates.check(); await manager._operation;
+    assert.equal(updates.status().mode, 'managed'); assert.equal(updates.status().installation, null);
+    assert.equal(updates.status().reason, null); assert.equal(updates.status().canInstall, true);
+    updates.install({ version, commit }); await manager._operation;
+    assert.deepEqual(calls, ['snapshot', 'install', 'activate']);
+    assert.equal(updates.status().state, 'updated'); assert.equal(updates.gate.locked, false);
+    assert.ok(constructions >= 4);
+  } finally {
+    disposers.forEach(dispose => dispose()); shared.delete(key);
+    assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
+  }
+});
+
+test('host capability refresh does not replace an in-flight installation or recovery', async () => {
+  const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'update-host-owner-')), disposers = [];
+  const shared = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')], key = updateProfileKey(root);
+  let count = 0;
+  try {
+    const updates = setupUpdates({ effect(setup) { disposers.push(setup()); } }, {
+      stateFile: join(root, 'state.json'), isBusy: () => false,
+      createAdapter() { count++; return { mode: 'check-only', reason: 'reload-unavailable', profileDir: root, host: null }; },
+    });
+    updates.ready();
+    const manager = shared.get(key).manager, before = count;
+    let finish; manager._operation = new Promise(done => { finish = done; });
+    updates.check(); assert.equal(count, before);
+    finish(); await manager._operation; manager._operation = null;
+    const release = updates.gate.tryAcquireIdleLock();
+    updates.ready(); assert.equal(count, before); release();
+  } finally {
+    disposers.forEach(dispose => dispose()); shared.delete(key);
     assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
   }
 });

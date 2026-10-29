@@ -153,9 +153,89 @@ test('development, unsupported hosts and dependency changes stay check-only', as
   ]) {
     await t.test(options.reason || options.error, async () => {
       const { tree } = await renderUpdatePanel(options);
-      const button = immediateUpdate(tree); assert.ok(!button || button.props.disabled);
+      const button = immediateUpdate(tree); assert.equal(button, null);
       assert.match(visibleText(tree), /手动|开发源码/);
+      const manual = find(tree, node => node.type === 'a' && node.children.includes('查看手动升级步骤'));
+      assert.ok(manual);
+      assert.equal(manual.props.href, 'https://github.com/bzny/dsh-plugin-tangui#readme');
     });
+  }
+});
+
+test('packaged DSH installation failures explain their actual cause without claiming development source', async t => {
+  const reasons = {
+    'host-unavailable': /更新环境|运行环境|宿主.*信息/,
+    'installation-mismatch': /运行位置.*安装位置|安装位置.*运行位置/,
+    'installation-unavailable': /读取.*安装|安装信息/,
+    'untrusted-source': /非官方|官方来源|官方.*来源/,
+    'reload-unavailable': /加载|热更新/,
+    'installer-unavailable': /安装器|安装工具/,
+  };
+  for (const [installation, explanation] of Object.entries(reasons)) {
+    await t.test(installation, async () => {
+      // Reproduce the older backend: every unavailable adapter was called
+      // development and emitted development_check_only, despite official install.
+      const { tree, calls } = await renderUpdatePanel({ mode: 'development', installation,
+        reason: 'development_check_only', canInstall: false });
+      const text = visibleText(tree);
+      assert.match(text, explanation);
+      assert.doesNotMatch(text, /开发源码|自动检查并在任务结束后更新|任务结束后会自动更新/);
+      assert.match(text, /自动检查新版本/);
+      assert.match(text, /每小时.*北京时间.*01:00.*07:00/);
+      assert.equal(immediateUpdate(tree), null);
+      assert.ok(find(tree, node => node.type === 'a' && node.children.includes('查看手动升级步骤')));
+      const check = find(tree, node => node.type === 'button' && node.children.includes('检查更新'));
+      assert.equal(check.props.disabled, false); check.props.onClick();
+      assert.deepEqual(calls, [{ action: 'update_check' }]);
+    });
+  }
+});
+
+test('legacy unspecified check-only reason stays neutral and never promises automatic installation', async () => {
+  const { tree } = await renderUpdatePanel({ mode: 'development', installation: null,
+    reason: 'development_check_only', canInstall: false });
+  const text = visibleText(tree);
+  assert.doesNotMatch(text, /开发源码|自动检查并在任务结束后更新/);
+  assert.match(text, /只能检查|尚未.*安装/);
+  assert.equal(immediateUpdate(tree), null);
+});
+
+test('initial status makes no latest-version claim and lost host capability makes no install promise', async () => {
+  const initial = await renderUpdatePanel({ state: 'current', lastCheck: null, latest: null, candidate: null, canInstall: false });
+  assert.match(visibleText(initial.tree), /尚未检查/);
+  assert.doesNotMatch(visibleText(initial.tree), /已是最新/);
+  const unavailable = await renderUpdatePanel({ state: 'waiting_idle', mode: 'check-only', installation: 'reload-unavailable', reason: 'runtime_busy', canInstall: false });
+  assert.doesNotMatch(visibleText(unavailable.tree), /任务结束后会自动安装|自动检查并在任务结束后更新/);
+});
+
+test('a real development checkout is described once and keeps checks available', async () => {
+  const { tree } = await renderUpdatePanel({ mode: 'development', installation: 'development-source',
+    reason: 'development_check_only', canInstall: false });
+  const text = visibleText(tree);
+  assert.equal((text.match(/开发源码/g) || []).length, 1);
+  assert.match(text, /不自动覆盖|不会自动覆盖/);
+  assert.equal(immediateUpdate(tree), null);
+  assert.match(text, /自动检查新版本/);
+});
+
+test('check-only mode and an unavailable manual endpoint offer the manual guide instead of a dead button', async () => {
+  for (const options of [
+    { mode: 'check-only', installation: 'installer-unavailable', reason: 'host_check_only', canInstall: false },
+    { mode: 'managed', manualInstall: false, canInstall: false },
+    { state: 'error', error: 'manual_required_install_scripts', candidate: null, canInstall: false },
+  ]) {
+    const { tree } = await renderUpdatePanel(options);
+    assert.equal(immediateUpdate(tree), null);
+    assert.ok(find(tree, node => node.type === 'a' && node.children.includes('查看手动升级步骤')));
+    assert.doesNotMatch(visibleText(tree), /自动检查并在任务结束后更新/);
+  }
+});
+
+test('pending restart shows disk activation status and cannot request another update', async () => {
+  for (const rollbackPending of [false, true]) {
+    const { tree } = await renderUpdatePanel({ state: 'restarting_needed', canInstall: false, rollbackPending });
+    assert.equal(immediateUpdate(tree), null);
+    assert.match(visibleText(tree), rollbackPending ? /旧版.*恢复到磁盘.*重启/ : /磁盘版本已更新.*当前仍运行旧版.*重启/);
   }
 });
 

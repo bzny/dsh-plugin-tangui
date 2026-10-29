@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { resolve, join, sep } from 'node:path';
 import { apply } from '../lib/index.js';
 import { updateProfileKey } from '../lib/update-host.js';
+import { setupUpdates } from '../lib/update-integration.js';
 
 test('update settings use the DSH auth and origin checks and keep the normal plugin route usable', async t => {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
@@ -38,7 +39,9 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
   assert.equal((await request({ action: 'update_auto', enabled: false }, { origin: 'https://untrusted.example' })).status, 403);
   assert.equal((await request({ action: 'update_auto', enabled: 'false' })).status, 400);
   let response = await request({ action: 'update_auto', enabled: false }); assert.equal(response.status, 200);
-  let state = await response.json(); assert.equal(state.updates.auto, false); assert.equal(state.updates.mode, 'development');
+  let state = await response.json(); assert.equal(state.updates.auto, false); assert.equal(state.updates.mode, 'check-only');
+  assert.equal(state.updates.installation, 'host-unavailable');
+  assert.equal(JSON.parse(readFileSync(join(root, 'plugin-update.json'), 'utf8')).installation, 'host-unavailable');
   assert.equal(JSON.parse(readFileSync(join(root, 'plugin-update.json'), 'utf8')).auto, false);
   response = await request({ action: 'update_check' }); assert.equal(response.status, 200);
   await new Promise(done => setImmediate(done));
@@ -59,8 +62,7 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
 
   const coordinator = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')].get(updateProfileKey(root));
   const calls = [];
-  coordinator.manager.mode = 'managed';
-  coordinator.manager.host = {
+  const host = {
     tryAcquireIdleLock: () => coordinator.gate.tryAcquireIdleLock(),
     async snapshot() { calls.push('snapshot'); return {}; },
     async install(value) { calls.push('install'); assert.equal(value.commit, target.commit); },
@@ -68,6 +70,11 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
     async getActiveVersion() { return target.version; },
     async restore() { calls.push('restore'); },
   };
+  // Supply a supported host through the same adapter boundary as DSH, rather
+  // than changing manager fields that capability refresh is meant to replace.
+  const supported = setupUpdates({ effect }, { stateFile, isBusy: () => false,
+    createAdapter: () => ({ mode: 'managed', reason: null, profileDir: root, host }) });
+  supported.ready();
   globalThis.fetch = (url, options) => {
     const path = String(url);
     if (path.endsWith('/releases/latest')) return Promise.resolve(new Response(JSON.stringify({ draft: false, prerelease: false, tag_name: `v${target.version}` })));

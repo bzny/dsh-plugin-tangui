@@ -191,64 +191,322 @@ window.__ModuleLoader__.load({
 
     function UpdatePanel({ update, action, busy }) {
       if (!update) return null;
-      const labels = { current: '当前已是可用版本', checking: '正在检查', available: '发现新版本', waiting_idle: '等待任务结束或保存编辑',
-        installing: '正在安装并验证', restarting_needed: '等待重启 DSH', updated: '新版已生效', rolled_back: '更新未成功，已恢复旧版', error: '更新未完成' };
-      const reasons = { development_check_only: '本机连接的是开发源码，仅检查版本，不自动覆盖。',
-        host_check_only: '此 DSH 暂不支持自动安装，可检查版本后手动更新。', runtime_busy: '请先完成社区运行、游戏、配对或尚未保存的编辑；更新会继续等待。',
-        auto_disabled: '自动更新已关闭，可点击立即更新完成本次安装。', restart_required: '磁盘版本已更新，当前仍运行旧版；请在方便时通过原有启动器重启 DSH。',
-        rollback_restart_required: '旧版已恢复到磁盘，需要重启 DSH 才能重新生效。',
-        recovery_required: '自动恢复未完成，请保留原状态文件并按仓库说明重新安装。',
-        installation_changed: '安装来源已由其他操作改变，本次自动更新已停止，保留你的新选择。',
-        installation_unavailable: '安装尚未开始，现有插件没有被替换；稍后可重试。',
-        update_candidate_changed: '可更新版本已变化，请重新检查更新，确认版本后再操作。',
-        update_not_ready: '当前尚未满足安装条件，请结束任务或保存编辑后再试。',
-        update_busy: '当前任务或操作尚未结束，更新暂时不可用，请稍后重试。' };
-      const errors = { network_unavailable: '暂时无法连接 GitHub，现有功能不受影响。', request_timeout: '检查超时，稍后可以重试。',
-        release_request_failed: 'GitHub 暂未返回版本信息，稍后可以重试。', release_unavailable: '暂时没有可读取的正式版本。',
-        manual_required_dependencies: '新版改变了依赖，需要按仓库说明手动升级。', manual_required_install_scripts: '新版需要额外安装步骤，请按仓库说明手动升级。',
-        rollback_failed: '请保留原有状态，手动检查安装。' };
-      const development = update.installation === 'development-source';
-      const disabled = busy || update.state === 'installing' || update.state === 'checking';
-      const candidate = update.candidate;
-      const candidateReady = !!(candidate && candidate.version && candidate.commit);
-      const installStateBlocked = update.state === 'checking' || update.state === 'installing' || update.state === 'restarting_needed';
-      const manualRequired = development || update.mode !== 'managed' || update.reason === 'host_check_only' || update.error === 'manual_required_dependencies' || update.error === 'manual_required_install_scripts';
-      const installDisabled = !!(busy || installStateBlocked || manualRequired || update.manualInstall !== true || update.canInstall !== true || !candidateReady);
-      let installNote = '';
-      if (candidate && update.state === 'checking') {
-        installNote = '正在检查更新，请等待检查完成。';
-      } else if (candidate && update.state === 'installing') {
-        installNote = '正在安装并验证，请等待本次更新完成。';
-      } else if (update.state === 'restarting_needed') {
-        installNote = update.rollbackPending ? reasons.rollback_restart_required : reasons.restart_required;
-      } else if (candidate && busy) {
-        installNote = '当前任务或操作尚未结束，立即更新按钮暂时禁用；请结束任务或保存编辑后再试。';
-      } else if (update.manualInstall !== true) {
-        installNote = '后台尚未加载手动更新入口；现有自动更新仍按开关执行，必要时请按仓库说明升级。';
-      } else if (candidate && !candidateReady) {
-        installNote = '更新候选缺少版本或提交，暂不能手动安装，请重新检查更新。';
-      } else if (candidate && update.canInstall !== true) {
-        installNote = manualRequired ? '当前候选不能通过此入口安装，请按仓库说明手动更新。' : '当前来源、宿主或候选尚不可安装，请根据状态说明处理后再检查。';
+
+      var state = update.state || 'current';
+      var reason = update.reason || '';
+      var installation = update.installation || null;
+      var candidate = update.candidate || null;
+      var candidateComplete = Boolean(candidate && candidate.version && candidate.commit);
+
+      var errorMessages = {
+        network_unavailable: '网络无法连接 GitHub，请检查网络后重试。',
+        request_timeout: '检查超时，请稍后重试。',
+        release_request_failed: 'GitHub 暂未返回版本，请稍后重试。',
+        release_unavailable: '当前没有可用的正式版本。',
+        manual_required_dependencies: '新版改变了依赖，需要按手动升级步骤处理，当前入口不会继续安装。',
+        manual_required_install_scripts: '新版需要额外的安装步骤，请按手动升级步骤处理，当前入口不会继续安装。',
+        rollback_failed: '回滚失败，已保留原有状态，请手动检查安装状态。'
+      };
+
+      var errorCode = typeof update.error === 'string'
+        ? update.error
+        : update.error && typeof update.error.code === 'string'
+          ? update.error.code
+          : '';
+      if (!errorCode && errorMessages[reason]) errorCode = reason;
+
+      var manualError = errorCode === 'manual_required_dependencies' ||
+        errorCode === 'manual_required_install_scripts';
+      var hasError = Boolean(update.error) || state === 'error' || Boolean(errorCode);
+
+      var installEntry = update.mode === 'managed' &&
+        update.manualInstall === true &&
+        reason !== 'host_check_only' && reason !== 'development_check_only' &&
+        !installation;
+      var autoInstallEntry = installEntry && !manualError;
+
+      var restartPending = update.rollbackPending === true ||
+        state === 'restarting_needed' ||
+        reason === 'restart_required' ||
+        reason === 'rollback_restart_required';
+
+      var persistentBlocked = manualError ||
+        reason === 'recovery_required' ||
+        reason === 'installation_changed' ||
+        reason === 'installation_unavailable' ||
+        reason === 'update_candidate_changed' ||
+        reason === 'update_not_ready';
+
+      var shortTerm = Boolean(busy) ||
+        state === 'checking' ||
+        state === 'installing' ||
+        state === 'waiting_idle' ||
+        reason === 'runtime_busy' ||
+        reason === 'update_busy';
+
+      var canInstallNow = update.canInstall === true &&
+        !busy &&
+        state !== 'checking' &&
+        state !== 'installing' &&
+        state !== 'restarting_needed' &&
+        !restartPending &&
+        !persistentBlocked &&
+        reason !== 'update_busy' &&
+        installEntry &&
+        candidateComplete;
+
+      var showInstall = installEntry &&
+        candidateComplete &&
+        !persistentBlocked &&
+        !restartPending &&
+        (update.canInstall === true || shortTerm);
+
+      var installationNotes = {
+        'development-source': '当前运行的是开发源码，正式版不会自动覆盖。',
+        'host-unavailable': '宿主未提供更新环境，不能通过此入口安装。',
+        'installation-mismatch': '当前运行位置与安装位置不一致，不能安全地通过此入口安装。',
+        'installation-unavailable': '无法读取安装信息，暂时不能通过此入口安装。',
+        'untrusted-source': '当前插件来自非官方来源，不能通过此入口安装。',
+        'reload-unavailable': '宿主未提供即时加载能力，不能通过此入口安装。',
+        'installer-unavailable': '宿主安装器不可用，不能通过此入口安装。'
+      };
+
+      var capabilityNote = installation && installationNotes[installation]
+        ? installationNotes[installation]
+        : '';
+
+      if (!capabilityNote && update.manualInstall !== true) {
+        capabilityNote = '当前只能检查版本，尚未获得安装能力；后台可能为旧版，尚未提供此安装入口。';
+      } else if (!capabilityNote && reason === 'development_check_only') {
+        capabilityNote = '当前只能检查版本，尚未获得安装能力。';
+      } else if (!capabilityNote && reason === 'host_check_only') {
+        capabilityNote = '当前只能检查版本，宿主未提供安装能力。';
+      } else if (!capabilityNote && !installEntry) {
+        capabilityNote = '当前只能检查版本，尚未获得安装能力。';
       }
-      const waitingNote = update.state === 'waiting_idle' ? (update.auto ? '任务结束后会自动更新。' : '请结束任务或保存编辑后，再点击立即更新。') : '';
-      return h('details', { style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
-        h('summary', { style: { cursor: 'pointer' } }, `插件更新 · v${update.current} · ${labels[update.state] || '等待检查'}`),
-        h('p', { role: 'status' }, `正在运行 v${update.current}`, update.latest ? ` · 最新正式版 v${update.latest}` : ''),
-        installNote && h('p', { role: 'status' }, installNote),
-        waitingNote && h('p', { role: 'status' }, waitingNote),
-        candidate && h('button', { type: 'button', style: buttonStyle, disabled: installDisabled,
-          onClick: () => { if (!installDisabled) void action({ action: 'update_install', version: candidate.version, commit: candidate.commit }); } },
-          update.mode === 'managed' && candidateReady ? `立即更新至 v${candidate.version}` : '立即更新'),
-        h('label', { style: { display: 'block', margin: '12px 0' } }, h('input', { type: 'checkbox', checked: update.auto, disabled: busy || !!update.storageError,
-          onChange: event => void action({ action: 'update_auto', enabled: event.target.checked }) }), ' 自动检查并在任务结束后更新'),
-        h('p', { style: { fontSize: '14px' } }, development ? `${reasons.development_check_only} 请按仓库说明手动更新。` : update.mode !== 'managed' ? `${reasons.host_check_only} 请按仓库说明手动更新。` :
-          '每小时自动检查本插件的 GitHub 正式版本；北京时间 01:00–07:00 暂停自动检查，可随时手动检查。更新等待碳硅任务结束，不会重启整个 DSH；保留绑定、人设、授权和预算。'),
-        update.reason && reasons[update.reason] && reasons[update.reason] !== installNote && !(waitingNote && update.reason === 'runtime_busy') && h('p', { role: 'status' }, reasons[update.reason]),
-        update.error && h('p', { role: 'alert' }, errors[update.error] || reasons[update.error] || '此次更新未完成，可重试检查；具体状态见上方。'),
-        update.storageError && h('p', { role: 'alert' }, '更新设置未能保存，请检查本机插件更新状态文件；原文件保留。'),
-        h('button', { type: 'button', style: buttonStyle, disabled, onClick: () => void action({ action: 'update_check' }) }, update.blockedVersion ? '重新检查并重试' : '检查更新'),
-        h('a', { href: 'https://github.com/bzny/dsh-plugin-tangui/releases', target: '_blank', rel: 'noopener noreferrer' }, '查看发布说明'),
-        update.lastCheck && h('p', { style: { fontSize: '14px' } }, `上次检查：${new Date(update.lastCheck).toLocaleString()}`));
+
+      var primary = '';
+      if (manualError) {
+        primary = errorMessages[errorCode];
+      } else if (update.rollbackPending === true || reason === 'rollback_restart_required') {
+        primary = '旧版已恢复到磁盘，需要重启才能重新生效；请在方便时通过原有启动器重启 DSH。';
+      } else if (state === 'restarting_needed' || reason === 'restart_required') {
+        primary = '磁盘版本已更新，当前仍运行旧版；请在方便时通过原有启动器重启 DSH。';
+      } else if (state === 'installing') {
+        primary = '正在安装已检查版本，请勿重复操作；安装完成不代表新版本已经生效。';
+      } else if (state === 'checking') {
+        primary = '正在检查 GitHub 正式版本。';
+      } else if (state === 'waiting_idle') {
+        primary = !autoInstallEntry ? capabilityNote || '当前只能检查版本，尚未获得安装能力。' : update.auto === true
+          ? '更新已准备好，任务结束后会自动安装。'
+          : '请先结束任务或保存编辑，再点击“立即更新”；自动更新已关闭。';
+      } else if (busy) {
+        primary = '当前操作尚未结束，请完成操作或保存编辑后再更新。';
+      } else if (reason === 'runtime_busy') {
+        primary = '当前有任务运行，更新会等待任务结束。';
+      } else if (reason === 'update_busy') {
+        primary = '另一项更新操作正在进行，请等待其完成。';
+      } else if (
+        reason === 'auto_disabled' &&
+        autoInstallEntry &&
+        candidateComplete &&
+        update.canInstall === true
+      ) {
+        primary = '自动更新已关闭，可点击立即更新完成本次安装。';
+      } else if (reason === 'recovery_required') {
+        primary = '更新需要人工恢复检查，请查看手动升级步骤，不要重复安装。';
+      } else if (reason === 'installation_changed') {
+        primary = '安装位置或安装状态已经变化，请重新检查后再操作。';
+      } else if (reason === 'installation_unavailable') {
+        primary = '当前无法读取安装信息，请重新检查或按手动升级步骤处理。';
+      } else if (reason === 'update_candidate_changed') {
+        primary = '待安装版本已变化，请重新检查后再更新。';
+      } else if (reason === 'update_not_ready') {
+        primary = '待安装版本信息尚未准备好，请重新检查后再试。';
+      } else if (reason === 'development_check_only' || reason === 'host_check_only') {
+        primary = capabilityNote || '当前只能检查版本，尚未获得安装能力。';
+      } else if (capabilityNote) {
+        primary = capabilityNote;
+      } else if (state === 'error') {
+        primary = '本次检查或更新未完成，请按下方错误提示处理。';
+      } else if (state === 'available') {
+        if (candidateComplete && update.canInstall === true) {
+          primary = '已检查到 v' + candidate.version + '，可立即更新；安装只使用该次已检查的版本。';
+        } else if (candidateComplete) {
+          primary = '已检查到 v' + candidate.version + '，但当前不能通过此入口安装；请重新检查或查看手动升级步骤。';
+        } else {
+          primary = '已发现新版本，但版本信息不完整，请重新检查。';
+        }
+      } else if (state === 'updated') {
+        primary = '更新流程已完成；当前生效版本仍以“正在运行”为准。';
+      } else if (state === 'rolled_back') {
+        primary = '已回滚到旧版；当前生效版本以“正在运行”为准。';
+      } else if (state === 'current') {
+        primary = update.lastCheck ? '上次检查未发现可安装的更新版本。' : '尚未检查版本，可点击“检查更新”。';
+      } else {
+        primary = '可手动检查 GitHub 正式版本。';
+      }
+
+      var needsManualLink = manualError ||
+        !installEntry ||
+        persistentBlocked ||
+        reason === 'development_check_only' ||
+        reason === 'host_check_only' ||
+        errorCode === 'rollback_failed' ||
+        (
+          state === 'available' &&
+          update.canInstall !== true &&
+          !shortTerm &&
+          !restartPending &&
+          reason !== 'update_not_ready' &&
+          reason !== 'update_candidate_changed'
+        );
+
+      var stateNames = {
+        current: update.lastCheck ? '暂无新版' : '等待检查',
+        checking: '正在检查',
+        available: '发现新版本',
+        waiting_idle: '等待任务结束',
+        installing: '正在安装',
+        restarting_needed: '等待重启',
+        updated: '更新流程完成',
+        rolled_back: '已回滚',
+        error: '需要处理'
+      };
+
+      var lastCheckText = update.lastCheck
+        ? new Date(update.lastCheck).toLocaleString()
+        : '尚未检查';
+
+      var autoDescription = '每小时自动检查 GitHub 正式版本；北京时间 01:00–07:00 暂停自动检查，可随时手动检查。';
+      if (autoInstallEntry) {
+        autoDescription += ' 此入口可安装时，会等待任务结束再更新；不重启整个 DSH，保留绑定、人设、授权和预算。';
+      }
+
+      return h(
+        'details',
+        {
+          style: {
+            margin: '18px 0',
+            padding: '12px',
+            border: '1px solid var(--dsw-alias-border-l2, #aaa)',
+            borderRadius: '10px'
+          }
+        },
+        h(
+          'summary',
+          { style: { cursor: 'pointer' } },
+          '插件更新 · v' + update.current + ' · ' + (stateNames[state] || '版本状态')
+        ),
+        h(
+          'div',
+          null,
+          h('p', { role: 'status' }, primary),
+          capabilityNote && capabilityNote !== primary
+            ? h('p', null, capabilityNote)
+            : null,
+          h(
+            'p',
+            null,
+            '正在运行：v' + update.current,
+            h('br'),
+            '最新正式版：' + (update.latest ? 'v' + update.latest : '尚未获取')
+          ),
+          h(
+            'p',
+            null,
+            showInstall
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: buttonStyle,
+                    disabled: !canInstallNow || (state === 'waiting_idle' && update.auto === true),
+                    onClick: function () {
+                      if (!canInstallNow || (state === 'waiting_idle' && update.auto === true)) return;
+                      action({
+                        action: 'update_install',
+                        version: candidate.version,
+                        commit: candidate.commit
+                      });
+                    }
+                  },
+                  '立即更新至 v' + candidate.version
+                )
+              : null,
+            showInstall ? ' ' : null,
+            h(
+              'button',
+              {
+                type: 'button',
+                style: buttonStyle,
+                disabled: Boolean(busy) || state === 'checking' || state === 'installing',
+                onClick: function () {
+                  if (busy || state === 'checking' || state === 'installing') return;
+                  action({ action: 'update_check' });
+                }
+              },
+              update.blockedVersion ? '重新检查并重试' : state === 'checking' ? '正在检查…' : '检查更新'
+            ),
+            ' ',
+            h(
+              'a',
+              {
+                href: 'https://github.com/bzny/dsh-plugin-tangui/releases',
+                target: '_blank',
+                rel: 'noopener noreferrer'
+              },
+              '发布说明'
+            )
+          ),
+          needsManualLink
+            ? h(
+                'p',
+                null,
+                h(
+                  'a',
+                  {
+                    href: 'https://github.com/bzny/dsh-plugin-tangui#readme',
+                    target: '_blank',
+                    rel: 'noopener noreferrer'
+                  },
+                  '查看手动升级步骤'
+                )
+              )
+            : null,
+          h(
+            'p',
+            null,
+            h(
+              'label',
+              null,
+              h('input', {
+                type: 'checkbox',
+                checked: update.auto === true,
+                disabled: Boolean(busy) || Boolean(update.storageError),
+                onChange: function (event) {
+                  if (busy || update.storageError) return;
+                  action({ action: 'update_auto', enabled: event.target.checked });
+                }
+              }),
+              ' ',
+              autoInstallEntry ? '自动检查并在任务结束后更新' : '自动检查新版本'
+            )
+          ),
+          h('p', null, autoDescription),
+          h('p', null, '上次检查：' + lastCheckText),
+          hasError && !manualError
+            ? h(
+                'p',
+                { role: 'alert' },
+                errorMessages[errorCode] || '更新或检查未完成，请重新检查；若仍失败，请查看手动升级步骤。'
+              )
+            : null,
+          update.storageError
+            ? h('p', { role: 'alert' }, '更新设置无法保存，原文件保留。')
+            : null
+        )
+      );
     }
 
     function ModelCallsPanel({ state }) {

@@ -122,6 +122,10 @@ test('development link and unavailable host are check-only', async () => {
   assert.equal(development.state, 'available'); assert.equal(development.reason, 'development_check_only'); assert.equal(host.calls.length, 0);
   const absent = await manager({ ...fixture() }).check();
   assert.equal(absent.state, 'available'); assert.equal(absent.reason, 'host_check_only');
+  const unsupported = manager({ ...fixture(), mode: 'check-only', host: host.host });
+  assert.equal((await unsupported.check()).reason, 'host_check_only');
+  assert.equal(unsupported.status().mode, 'check-only');
+  assert.equal(unsupported.canInstall(), false); assert.equal(host.calls.length, 0);
 });
 
 test('waits for idle, then installs once without fetching release again', async () => {
@@ -175,7 +179,7 @@ test('manual install respects active tasks and does not silently queue while aut
 });
 
 test('manual entry keeps development, unsupported-host and restart conditions intact', async () => {
-  for (const [mode, supported, reason] of [['development', true, 'development_check_only'], ['managed', false, 'host_check_only']]) {
+  for (const [mode, supported, reason] of [['development', true, 'development_check_only'], ['check-only', true, 'host_check_only'], ['managed', false, 'host_check_only']]) {
     const host = hostFixture(), m = manager({ ...fixture(), mode, host: supported ? host.host : null, auto: false });
     await m.check({ install: false, manual: true }); assert.equal(m.canInstall(), false);
     assert.equal((await m.install({ version: '0.4.1', commit })).reason, reason);
