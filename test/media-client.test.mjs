@@ -6,10 +6,104 @@ import { MediaClient, readVideoContext, readPostVideos, MAX_CONTEXT_PAGES } from
 import { RuntimeApi, fail } from '../lib/runtime-api.js';
 import { CommunityRuntime } from '../lib/runtime.js';
 import { validateRuntimeInput } from '../lib/runtime-tool.js';
+import { createRuntimeModel } from '../lib/runtime-model.js';
 
 const page = (changes = {}) => ({ asset_id: 'media-test', state: 'ready', summary: '游戏演示', tags: ['游戏'], frame_interval_seconds: 3,
   segments: [{ start: 0, end: 2, text: '我们开始游戏', source: 'asr' }],
   frames: [{ index: 0, time: 0, description: '人物出现在棋盘上', url: 'PRIVATE_FRAME_URL' }], next_cursor: null, limitations: [], secret: 'PRIVATE_SECRET', ...changes });
+
+const overview = (changes = {}) => ({ asset_id: 'media-test', state: 'ready', material_kind: 'overview', context_version: 2,
+  summary: 'Q版角色跳舞，背景是绿幕。', content_type: '舞蹈', highlights: ['相似形象一起跳舞'], quotes: [], tags: ['二创'],
+  limitations: ['静帧不能判断节拍。'], segments: [], frames: [], next_cursor: null,
+  scope: { duration_seconds: 40, audio_track_present: true, transcript_state: 'no_speech_detected',
+    speech_excerpted: false, sampled_frame_count: 14, sampled_times: ['PRIVATE_TIME'], private_path: 'PRIVATE_PATH' }, ...changes });
+
+test('whole-video material needs one request, keeps audio distinction, and omits raw evidence', async () => {
+  let calls = 0;
+  const material = await readVideoContext(async () => {
+    calls++;
+    return overview({ segments: [{ text: 'PRIVATE_TRANSCRIPT' }], frames: [{ url: 'PRIVATE_URL' }], secret: 'PRIVATE_SECRET' });
+  }, 'media-test');
+  assert.equal(calls, 1); assert.equal(material.pages_read, 1);
+  assert.equal(material.scope.audio_track_present, true);
+  assert.equal(material.scope.transcript_state, 'no_speech_detected');
+  assert.equal(material.summary, overview().summary);
+  assert.match(material.notice, /不等于没有人声或音乐/);
+  assert.ok(!JSON.stringify(material).includes('PRIVATE'));
+  assert.equal(material.segments, undefined); assert.equal(material.frames, undefined);
+});
+
+test('invalid overview cannot silently become legacy or a completed reading', async () => {
+  for (const change of [{ context_version: 3 }, { scope: null }, { summary: '  ' },
+    { scope: { ...overview().scope, audio_track_present: 'false' } },
+    { scope: { ...overview().scope, sampled_frame_count: 16 } },
+    { scope: { ...overview().scope, transcript_state: 'no_sound' } },
+    { scope: { ...overview().scope, duration_seconds: NaN } }]) {
+    await assert.rejects(readVideoContext(async () => overview(change), 'media-test'), e => e.code === 'invalid_media_response');
+  }
+});
+
+test('media client requests compact material', async () => {
+  let route;
+  const client = new MediaClient({ data: async value => { route = value; return overview(); } });
+  await client.context('media-test');
+  assert.equal(new URL(route, 'http://localhost').searchParams.get('view'), 'overview');
+});
+
+for (const failure of ['timeout', 'malformed_json']) {
+  test(`overview reading ${failure} is counted once without publishing; explicit retry reuses server material`, async () => {
+    let calls = 0, reads = 0, submissions = 0;
+    const material = overview(), inputs = [];
+    const decide = createRuntimeModel(() => ({
+      agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) },
+      llm: { async prepareCall(config) {
+        assert.equal(config.maxTokens, 64000);
+        return { config, async *stream(request) {
+          calls++;
+          inputs.push(JSON.stringify(request.messages));
+          if (calls === 1 && failure === 'timeout') {
+            yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TIMEOUT' } } };
+            return;
+          }
+          const raw = calls === 1 ? '{broken JSON' : JSON.stringify({ participate: true, body: '两个Q版形象放在一起跳舞，像鱼塘里的双人节目。' });
+          yield { type: 'text-delta', index: 0, text: raw };
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: raw } };
+          yield { type: 'finish', reason: { kind: 'stop' } };
+        } };
+      } },
+    }));
+    const runtime = Object.create(CommunityRuntime.prototype);
+    Object.assign(runtime, {
+      state: { completed: [], model_calls: 0, cursor: '0', identity: { base_url: 'http://localhost' }, deferred_pending: [] },
+      actor: { id: 'ai-test', kind: 'ai' }, abort: new AbortController(), decide,
+      checkActive() {}, budget() {}, phaseTo() {}, connectionReady: async () => {},
+      commit(value) { Object.assign(this.state, value); }, diary: { record() {} },
+      configuration: async () => ({ description: '伙伴', effective: {} }),
+      get: async route => {
+        if (route.includes('/context?')) {
+          reads++; assert.match(route, /view=overview/); return { data: material };
+        }
+        if (route.includes('/comments?')) return { data: [], next_cursor: null };
+        return { data: { id: 'post-test', title: '视频', author: { id: 'human-test' },
+          content: [{ type: 'video', asset_id: 'media-test', context_state: 'ready' }] } };
+      },
+      async flushPending() {
+        submissions++;
+        assert.equal(this.state.pending.kind, 'comment');
+        this.commit({ completed: this.completedFor('browse:post-test', 'post-test', null, true), pending: null });
+      },
+    });
+    await assert.rejects(runtime.decideOn('post-test', 'browse:post-test'), e =>
+      e.code === (failure === 'timeout' ? 'runtime_model_timeout' : 'invalid_model_decision'));
+    assert.equal(calls, 1); assert.equal(runtime.state.model_calls, 1); assert.equal(submissions, 0);
+    assert.deepEqual(runtime.state.completed, []); assert.equal(runtime.state.pending, undefined);
+    assert.equal(await runtime.decideOn('post-test', 'browse:post-test'), true);
+    assert.equal(calls, 2); assert.equal(runtime.state.model_calls, 2); assert.equal(submissions, 1);
+    assert.equal(reads, 2); assert.ok(inputs.every(value => value.includes(material.summary) && !value.includes('PRIVATE')));
+    assert.equal(await runtime.decideOn('post-test', 'browse:post-test'), false);
+    assert.equal(calls, 2); assert.equal(submissions, 1);
+  });
+}
 
 test('timestamped video material omits URLs/secrets and states sampling limits', async () => {
   const value = await readVideoContext(async () => page(), 'media-test');
