@@ -98,11 +98,96 @@ function DraftReviewReminder({source}) {
     h('span', {style: {opacity: 0.75}}, '最终发表需在网站确认')
   );
 }
+
+// Observation summary presentation supplied by KIMI; runtime data wiring by Codex.
+function ObservationSummary({ observation }) {
+  const h = React.createElement;
+  if (!observation || typeof observation !== 'object') return null;
+  const check = observation.last_check && typeof observation.last_check === 'object' ? observation.last_check : null;
+  const trigger = observation.last_trigger && typeof observation.last_trigger === 'object' ? observation.last_trigger : null;
+  const waitingVideo = Number.isInteger(observation.waiting_video_events) && observation.waiting_video_events > 0 ? observation.waiting_video_events : 0;
+  const interrupted = observation.interrupted_model && typeof observation.interrupted_model === 'object' ? observation.interrupted_model : null;
+  if (!check && !trigger && !waitingVideo && !interrupted) return null;
+  const formatTime = value => {
+    const time = value ? new Date(value) : null;
+    return time && !Number.isNaN(time.getTime()) ? time.toLocaleString() : '时间未知';
+  };
+  const checkReasons = { checked: '已检查新内容', no_new_content: '本轮没有新内容', waiting_video: '有内容在等待视频材料', policy_paused: '按网站设置暂停', playing_game: '正在参加小游戏' };
+  const triggerReasons = { browse: '阅读新帖', human_mention: '收到人类的 @', ai_mention: '收到 AI 的 @', reply: '收到回复', diary_summary: '整理日记', post_draft: '构思帖子' };
+  const calls = check && Number.isSafeInteger(check.model_calls) && check.model_calls >= 0 ? check.model_calls : null;
+  const scopeNote = '（仅统计社区、日记与起草，不含游戏和 DSH 对话）';
+  return h('div', { style: { margin: '4px 0', overflowWrap: 'anywhere' } },
+    check && h('p', { style: { margin: '2px 0' } },
+      h('span', { className: `tangui-status-${check.status === 'interrupted' ? 'orange' : 'gray'}` },
+        `最近检查 ${formatTime(check.at)}${checkReasons[check.reason] ? ` · ${checkReasons[check.reason]}` : ''}${check.status === 'interrupted' ? ' · 未完成' : ''}`),
+      ` · ${calls === null ? '本轮模型调用次数未知' : calls > 0 ? `本轮社区/日记/起草模型调用 ${calls} 次` : '本轮未发起社区/日记/起草模型调用'}${scopeNote}`),
+    trigger && triggerReasons[trigger.kind] && h('p', { style: { margin: '2px 0' } },
+      `最近社区调用：${triggerReasons[trigger.kind]}${Number.isInteger(trigger.call_number) && trigger.call_number > 0 ? ` · 第 ${trigger.call_number} 次` : ''} · ${formatTime(trigger.at)}`),
+    waitingVideo > 0 && h('p', { style: { margin: '2px 0' }, className: 'tangui-status-orange' },
+      `有 ${waitingVideo} 条互动消息在等待视频材料；其他消息仍可继续处理。`),
+    interrupted && h('p', { style: { margin: '2px 0' }, className: 'tangui-status-red' },
+      `上次模型调用${triggerReasons[interrupted.kind] ? `（${triggerReasons[interrupted.kind]}）` : ''}未保存完整结果，费用是否发生无法确定；再次启动可能重新调用。`));
+}
+
+// Inbox reminder presentation supplied by KIMI; runtime data wiring by Codex.
+// 只展示数量与请求者名称，不展示私信正文，也不触发模型调用。
+function inboxCheckedAtText(checkedAt) {
+  try {
+    const time = checkedAt ? new Date(checkedAt) : null;
+    return time && !Number.isNaN(time.getTime()) ? time.toLocaleString() : '';
+  } catch (_) { return ''; }
+}
+
+// 链接必须是绑定社区同源 http(s)；复用与草稿审核链接一致的校验思路。
+function communityLink(platformUrl, raw) {
+  try {
+    const base = new URL(platformUrl);
+    const url = new URL(raw);
+    if (url.origin !== base.origin || url.username || url.password) return null;
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.href;
+  } catch (_) { return null; }
+}
+
+function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
+  const h = React.createElement;
+  if (!inbox || typeof inbox !== 'object') return null;
+  const friendCount = Number.isInteger(inbox.friend_request_count) && inbox.friend_request_count > 0 ? inbox.friend_request_count : 0;
+  const dmCount = Number.isInteger(inbox.dm_request_count) && inbox.dm_request_count > 0 ? inbox.dm_request_count : 0;
+  const unreadDm = Number.isInteger(inbox.unread_dm_count) && inbox.unread_dm_count > 0 ? inbox.unread_dm_count : 0;
+  const unread = Number.isInteger(inbox.unread_count) && inbox.unread_count > 0 ? inbox.unread_count : 0;
+  const friendNames = (Array.isArray(inbox.friend_requests) ? inbox.friend_requests : []).map(item => item && item.actor && item.actor.name).filter(name => typeof name === 'string' && name).slice(0, 3);
+  const dmNames = (Array.isArray(inbox.dm_requests) ? inbox.dm_requests : []).map(item => item && item.actor && item.actor.name).filter(name => typeof name === 'string' && name).slice(0, 3);
+  const hasData = friendCount > 0 || dmCount > 0 || unreadDm > 0 || unread > 0;
+  const checkedText = inboxCheckedAtText(inbox.checked_at);
+  if (!hasData && !inbox.error) return null; // 没数据不写“无申请”。
+  const messagesHref = communityLink(platformUrl, inbox.messages_url);
+  const friendsHref = communityLink(platformUrl, inbox.friends_url);
+  const namesText = names => names.join('、');
+  const friendText = friendCount ? `${friendNames.length ? `${namesText(friendNames)} 等 ${friendCount} 人` : `${friendCount} 人`}请求加为好友` : '';
+  const dmText = dmCount ? `${dmNames.length ? `${namesText(dmNames)} 等 ${dmCount} 人` : `${dmCount} 人`}发来私信请求` : '';
+  const summary = [];
+  if (friendCount) summary.push(`好友申请 ${friendCount}`);
+  if (dmCount) summary.push(`私信请求 ${dmCount}`);
+  if (unreadDm) summary.push(`未读私信 ${unreadDm}`);
+  if (unread) summary.push(`未读通知 ${unread}`);
+  return h('div', { style: { margin: '5px 0', overflowWrap: 'anywhere' } },
+    hasData && h('p', { style: { margin: '2px 0' }, className: 'tangui-status-orange' },
+      `收件提醒：${summary.join(' · ')}${friendText ? ` · ${friendText}` : ''}${dmText ? ` · ${dmText}` : ''}`),
+    hasData && h('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' } },
+      friendsHref ? h('a', { href: friendsHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理好友申请') : null,
+      messagesHref ? h('a', { href: messagesHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理私信') : null,
+      h('button', { type: 'button', style: { fontSize: '13px', padding: '3px 9px', borderRadius: '7px', cursor: 'pointer', font: 'inherit', border: '1px solid var(--dsw-alias-border-l2, #888)', color: 'inherit', background: 'var(--dsw-alias-bg-layer-2, transparent)' }, onClick: () => { if (onRefresh) void onRefresh(); } }, refreshLabel || '刷新收件提醒')),
+    inbox.error ? h('p', { style: { margin: '2px 0' }, className: 'tangui-status-red' },
+      `暂时无法刷新收件提醒${checkedText ? `，显示的是上次结果（${checkedText}）` : '。'}`) : null,
+    !inbox.error && checkedText ? h('small', { style: { display: 'block', opacity: 0.7 } }, `上次检查 ${checkedText}`) : null);
+}
     function ManagementCard({ sessionId }) {
       const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState('');
       const [busy, setBusy] = React.useState(false);
+      const [inboxRefreshing, setInboxRefreshing] = React.useState(false);
       const bindingRevision = React.useRef(0);
       React.useEffect(() => {
         if (!cardVisible) return;
@@ -141,6 +226,20 @@ function DraftReviewReminder({source}) {
         try { if (!await openManagementSession(state.managementSession.sessionId)) setError('暂时无法打开管理会话，可在这里重新指定。'); }
         catch { setError('原管理会话无法打开，可在这里重新指定。'); }
       };
+      // 收件提醒刷新：纯状态查询，不触发模型调用；运行停止、观察或预算耗尽时仍可刷新。
+      const refreshInbox = async () => {
+        if (inboxRefreshing) return;
+        setInboxRefreshing(true);
+        try {
+          const response = await fetch(ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tangui-client': '1' },
+            body: JSON.stringify({ action: 'inbox_refresh' }) });
+          const value = await response.json();
+          if (!response.ok) throw new Error(value.error?.message || 'refresh_failed');
+          bindingRevision.current++;
+          setState(value); setError('');
+        } catch { setError('暂时无法刷新收件提醒，显示的是上次结果。'); }
+        finally { setInboxRefreshing(false); }
+      };
       // Only this browser's display and read-only polling stop. Community work
       // and model logs belong to the server and do not depend on this view.
       if (!cardVisible || !sessionId || !state) return null;
@@ -160,6 +259,7 @@ function DraftReviewReminder({source}) {
         state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
         error && h('p', { role: 'status', style: { color: '#bd6d19', margin: '5px 0' } }, error),
         here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
+        here && h(InboxReminder, { inbox: state.runtime?.inbox, platformUrl: state.platformUrl, onRefresh: refreshInbox, refreshLabel: inboxRefreshing ? '正在刷新…' : '刷新收件提醒' }),
         here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
         here && summary && h('div', null,
           h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
@@ -168,6 +268,7 @@ function DraftReviewReminder({source}) {
             summary.modelStage ? h('span', { className: `tangui-status-${summary.stageTone}` }, summary.modelStage) : h('span', { className: 'tangui-status-gray' }, summary.model),
             h('span', null, summary.modelElapsed),
             summary.modelResult && h('span', null, ' · ', h('span', { className: `tangui-status-${summary.resultTone}` }, summary.modelResult))),
+          h(ObservationSummary, { observation: state.runtime?.observation }),
           summary.error && h('p', { role: 'alert', style: { margin: '5px 0', color: '#d54949' } }, summary.error),
           h('details', null, h('summary', { style: { cursor: 'pointer' } }, '展开运行与模型记录'),
             h('p', null, `累计模型调用 ${state.runtime?.model_calls ?? 0} 次 · 已接收回复 ${state.runtime?.replies ?? 0} 条 · 主动发帖 ${state.runtime?.posts ?? 0} 篇`),
@@ -534,7 +635,7 @@ function DraftReviewReminder({source}) {
       const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
       const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
       const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
-      const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化' };
+      const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化', content_unavailable: '内容已撤回或不可访问，停止追发' };
       const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
       return h('details', { className: 'tangui-session-status', style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
         h('style', null, SESSION_STATUS_CSS),
@@ -589,6 +690,7 @@ function DraftReviewReminder({source}) {
       const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
         writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
+        content_unavailable: '内容已撤回或不可访问，已跳过',
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
         cycle_complete: '本轮检查结束', user_stopped: '已按要求停止', budget_exhausted: '可提高累计预算后继续', request_failed: '请查看下方原因', not_started: '尚未启动' }[runtime.detail] || runtime.detail;
       const button = (text, payload, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || disabled, onClick: () => void action(payload) }, text);
@@ -604,6 +706,8 @@ function DraftReviewReminder({source}) {
         connection.binding && h('p', null, '同一账号连接用于人设、社区、小游戏和日记。',
           h('a', { href: `${state.platformUrl}/manage#companion-preferences`, target: '_blank', rel: 'noopener noreferrer' }, '前往网站设置账号行为与每日写日记')),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
+        h(InboxReminder, { inbox: runtime.inbox, platformUrl: state.platformUrl, onRefresh: () => action({ action: 'inbox_refresh' }), refreshLabel: '刷新收件提醒' }),
+        h(ObservationSummary, { observation: runtime.observation }),
         runtime.last_model_diagnostic && h('details', null, h('summary', null, '最近一次模型调用详情'),
           h('p', null, '结束情况：', ({ stop: '正常结束', 'max-tokens': '输出额度用尽', error: '模型服务错误', aborted: '提前中止', none: '未收到结束标记', unknown: '未知结束情况', 'tool-calls': '返回了工具操作' })[runtime.last_model_diagnostic.finishKind] || '未知'),
           h('p', null, `正文 ${runtime.last_model_diagnostic.textCharacters ?? '未知'} 字符 · 思考 ${runtime.last_model_diagnostic.reasoningCharacters ?? '未知'} 字符`),

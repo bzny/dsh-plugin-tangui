@@ -116,6 +116,20 @@ test('community uncertain submission retains original body key and call id when 
   assert.equal(f.runtime.state.model_calls, 1);
 });
 
+test('complete community output is already saved and remains pending during a post-model connection failure', async t => {
+  const f = runtimeFixture(t, reportedDecision(response));
+  f.runtime.connectionReady = async () => {
+    const saved = JSON.parse(readFileSync(f.runtime.stateFile, 'utf8'));
+    assert.equal(saved.pending.payload.body, response.body);
+    assert.equal(saved.pending.call_id, CALL_ID);
+    assert.equal(saved.model_attempt, null);
+    throw Object.assign(new Error('fixture connection lost'), { code: 'network_error' });
+  };
+  await assert.rejects(f.invoke(), { code: 'network_error' });
+  assert.equal(f.submissions.length, 0);
+  assert.equal(f.runtime.publicStatus().last_model_call.status, 'pending');
+});
+
 for (const reason of ['stopped', 'expired']) {
   test(`community ${reason} call retains its id and makes no submission`, async t => {
     let f;

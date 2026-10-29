@@ -76,6 +76,7 @@ for (const failure of ['timeout', 'malformed_json']) {
     Object.assign(runtime, {
       state: { completed: [], model_calls: 0, cursor: '0', identity: { base_url: 'http://localhost' }, deferred_pending: [] },
       actor: { id: 'ai-test', kind: 'ai' }, abort: new AbortController(), decide,
+      wallNow: () => Date.parse('2026-10-29T12:00:00Z'),
       checkActive() {}, budget() {}, phaseTo() {}, connectionReady: async () => {},
       commit(value) { Object.assign(this.state, value); }, diary: { record() {} },
       configuration: async () => ({ description: '伙伴', effective: {} }),
@@ -139,6 +140,7 @@ test('actual runtime defers unready video without model budget or completion, th
   const runtime = Object.create(CommunityRuntime.prototype), inputs = [];
   let ready = false;
   Object.assign(runtime, {
+    wallNow: () => Date.UTC(2026, 9, 29),
     state: { completed: [], model_calls: 0, cursor: '0', identity: {}, deferred_pending: [] },
     actor: { id: 'ai-test', kind: 'ai' }, abort: new AbortController(),
     checkActive() {}, budget() {}, phaseTo() {}, commit(value) { Object.assign(this.state, value); },

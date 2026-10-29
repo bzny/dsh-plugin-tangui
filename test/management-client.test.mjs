@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 // Exercise the actual chat-slot component, including its network and navigation
 // boundaries. No real session, model, community or credential is used.
-function page(initial, sessionId = 'session-current', visible = true) {
+function page(initial, sessionId = 'session-current', visible = true, slot = 'conversation.input.dock') {
   let factory, current, state = initial, failed = false, serial = 0;
   const components = new Map(), timers = new Map(), requests = [], opened = [];
   const storage = new Map([['tangui-management-card-visible', visible ? 'on' : 'off']]), storageListeners = new Set();
@@ -21,8 +21,10 @@ function page(initial, sessionId = 'session-current', visible = true) {
     URL, window: { __ModuleLoader__: { load(v) { factory = v.factory; } },
       addEventListener(name, callback) { if (name === 'storage') storageListeners.add(callback); },
       removeEventListener(name, callback) { if (name === 'storage') storageListeners.delete(callback); } }, AbortController,
+    crypto: { randomUUID: () => 'test-observation-uuid' },
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     setTimeout(fn, ms) { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { timers.delete(id); },
+    setInterval(fn, ms) { return setTimeout(fn, ms); }, clearInterval(id) { clearTimeout(id); },
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
       if (failed) throw new Error('private upstream message must not display');
@@ -36,12 +38,13 @@ function page(initial, sessionId = 'session-current', visible = true) {
   });
   factory(() => React).apply({ slots: { inject(_name, callback) { callback(); }, register(config, Component) { components.set(config.name, Component); } },
     get(name) { assert.equal(name, 'uiWorkspace'); return { openSession(id) { opened.push(id); } }; } });
-  const Component = components.get('conversation.input.dock');
+  const Component = components.get(slot);
   assert.ok(Component);
   const owner = { hooks: [], index: 0, effects: [] };
-  const render = () => { current = owner; owner.index = 0; owner.effects = []; const tree = Component({ sessionId }); owner.effects.forEach(f => f()); return tree; };
+  const render = () => { current = owner; owner.index = 0; owner.effects = []; const tree = slot === 'settings.section' ? Component({}) : Component({ sessionId }); owner.effects.forEach(f => f()); return tree; };
   const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); return render(); };
   return { render, settle, requests, opened, setState(value) { state = value; }, fail(value) { failed = value; },
+    mount(node) { const sub = { hooks: [], index: 0, effects: [] }; current = sub; const tree = node.type(node.props); sub.effects.forEach(f => f()); return tree; },
     visibility(value) { storage.set('tangui-management-card-visible', value ? 'on' : 'off'); for (const listener of storageListeners) listener({ key: 'tangui-management-card-visible' }); },
     async poll() { const next = [...timers].find(([, value]) => value.ms === 5000); assert.ok(next); timers.delete(next[0]); await next[1].fn(); return settle(); },
     dispose() { owner.hooks.forEach(hook => hook.cleanup?.()); }, timers };
@@ -128,5 +131,134 @@ test('chat card distinguishes temporary reconnection from stopped, online and pe
   assert.ok(!find(tree, node => node.props.className === 'tangui-status-orange' && /重连/.test(text(node))));
   state.runtime = { ...state.runtime, state: 'reconnecting', stopping: true }; ui.setState(state); tree = await ui.poll();
   assert.ok(find(tree, node => node.props.className === 'tangui-status-gray' && /社区正在停止/.test(text(node))));
+  ui.dispose();
+});
+
+const observation = (overrides = {}) => ({ last_check: { at: '2026-10-29T14:32:05+08:00', model_calls: 0, status: 'completed', reason: 'no_new_content' },
+  last_trigger: null, waiting_video_events: 0, interrupted_model: null, ...overrides });
+const observationBlock = (ui, tree) => {
+  const node = find(tree, n => typeof n.type === 'function' && n.type.name === 'ObservationSummary');
+  assert.ok(node, 'ObservationSummary is wired into this view');
+  return ui.mount(node);
+};
+
+test('old server without observation still renders the card without extra status', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  assert.match(text(tree), /本会话接收动态/);
+  assert.equal(observationBlock(ui, tree), null);
+  assert.doesNotMatch(text(tree), /最近检查|最近社区调用|等待视频材料|未保存完整结果/);
+});
+
+test('an empty observation round names no community calls without claiming zero cost', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation();
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /最近检查/);
+  assert.match(text(block), /本轮没有新内容/);
+  assert.match(text(block), /本轮未发起社区\/日记\/起草模型调用/);
+  assert.match(text(block), /仅统计社区、日记与起草，不含游戏和 DSH 对话/);
+  assert.doesNotMatch(text(block), /模型调用 0 次/);
+  assert.doesNotMatch(text(block), /账单为零|零费用|没有任何费用/);
+});
+
+test('a non-zero observation round shows the call count within the community scope', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation({ last_check: { at: '2026-10-29T14:35:00+08:00', model_calls: 3, status: 'completed', reason: 'checked' } });
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /本轮社区\/日记\/起草模型调用 3 次/);
+  assert.match(text(block), /已检查新内容/);
+});
+
+test('a missing observation count is unknown rather than a zero-call claim', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation({ last_check: { at: '2026-10-29T14:35:00+08:00', status: 'completed', reason: 'checked' } });
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /调用次数未知/); assert.doesNotMatch(text(block), /未发起|调用 0 次/);
+  ui.dispose();
+});
+
+test('each trigger kind renders as plain Chinese without exposing identifiers', async () => {
+  const kinds = { browse: '阅读新帖', human_mention: '收到人类的 @', ai_mention: '收到 AI 的 @', reply: '收到回复', diary_summary: '整理日记', post_draft: '构思帖子' };
+  for (const [kind, label] of Object.entries(kinds)) {
+    const state = fixture(); state.managementSession.sessionId = 'session-current';
+    state.runtime.observation = observation({ last_trigger: { kind, at: '2026-10-29T14:36:00+08:00', post_id: 'post-secret-42', call_number: 7 } });
+    const ui = page(state); ui.render(); const tree = await ui.settle();
+    const block = observationBlock(ui, tree);
+    assert.ok(text(block).includes(label), kind);
+    assert.match(text(block), /第 7 次/);
+    assert.doesNotMatch(text(block), /post-secret-42/);
+    assert.doesNotMatch(text(tree), /post-secret-42/);
+    ui.dispose();
+  }
+});
+
+test('unknown trigger kinds and extra fields stay hidden', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation({ last_trigger: { kind: 'telemetry_probe', at: '2026-10-29T14:36:00+08:00', post_id: 'post-secret-42', hint: 'secret-hint-99', raw_payload: 'raw-abc' } });
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.doesNotMatch(text(block), /telemetry_probe|secret-hint-99|raw-abc|post-secret-42/);
+});
+
+test('waiting video explains the queue while other messages keep flowing', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation({ waiting_video_events: 2, last_check: { at: '2026-10-29T14:37:00+08:00', model_calls: 0, status: 'completed', reason: 'waiting_video' } });
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /有 2 条互动消息在等待视频材料/);
+  assert.match(text(block), /其他消息仍可继续处理/);
+});
+
+test('interrupted model call is flagged with no approval or auto action', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime.observation = observation({ interrupted_model: { at: '2026-10-29T14:38:00+08:00', kind: 'reply', post_id: 'post-hidden-9' } });
+  const ui = page(state); ui.render(); const tree = await ui.settle();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /上次模型调用（收到回复）未保存完整结果/);
+  assert.match(text(block), /费用是否发生无法确定/);
+  assert.match(text(block), /再次启动可能重新调用/);
+  assert.doesNotMatch(text(block), /post-hidden-9/);
+  assert.equal(find(block, n => n.type === 'button'), null);
+  assert.equal(find(tree, n => n.type === 'button'), null);
+});
+
+test('observation survives the loop detail resetting to waiting and polling stays read-only', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime = { ...state.runtime, state: 'observing', detail: 'waiting', running: true };
+  state.runtime.observation = observation({ last_trigger: { kind: 'ai_mention', at: '2026-10-29T14:39:00+08:00', post_id: 'post-x', call_number: 11 } });
+  const ui = page(state); ui.render(); let tree = await ui.settle();
+  assert.match(text(tree), /正在观察社区/);
+  assert.match(text(observationBlock(ui, tree)), /收到 AI 的 @/);
+  state.runtime.observation = observation({ last_check: { at: '2026-10-29T14:40:00+08:00', model_calls: 1, status: 'completed', reason: 'checked' },
+    last_trigger: { kind: 'reply', at: '2026-10-29T14:39:30+08:00', post_id: 'post-y', call_number: 12 } });
+  ui.setState(state); tree = await ui.poll();
+  const block = observationBlock(ui, tree);
+  assert.match(text(block), /本轮社区\/日记\/起草模型调用 1 次/);
+  assert.match(text(block), /收到回复/);
+  assert.doesNotMatch(text(block), /post-x|post-y/);
+  assert.ok(ui.requests.every(r => !r.options.method));
+  ui.dispose();
+});
+
+test('RuntimePanel reuses the same read-only observation summary', async () => {
+  const state = { platformUrl: 'https://community.example', memoryDir: 'M', draft: { name: '', description: '', overrides: {} },
+    binding: { actorName: '测试伙伴' }, managementSession: { sessionId: 'session-current' }, modelLogs: [],
+    runtime: { state: 'observing', detail: 'waiting', running: true, model_calls: 2, replies: 1, posts: 0,
+      observation: observation({ last_trigger: { kind: 'human_mention', at: '2026-10-29T14:41:00+08:00', post_id: 'post-z', call_number: 13 } }) },
+    runtimeConnection: {} };
+  const ui = page(state, 'session-current', true, 'settings.section'); ui.render(); const tree = await ui.settle();
+  const panel = find(tree, n => typeof n.type === 'function' && n.type.name === 'RuntimePanel');
+  assert.ok(panel, 'RuntimePanel is part of the settings section');
+  const panelTree = ui.mount(panel);
+  const block = observationBlock(ui, panelTree);
+  assert.match(text(block), /最近检查/);
+  assert.match(text(block), /收到人类的 @/);
+  assert.match(text(block), /仅统计社区、日记与起草/);
+  assert.doesNotMatch(text(block), /post-z/);
+  assert.ok(ui.requests.every(r => !r.options.method));
   ui.dispose();
 });
