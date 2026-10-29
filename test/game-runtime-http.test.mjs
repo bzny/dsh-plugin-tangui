@@ -12,6 +12,7 @@ const ACTOR = { id: 'fixture-ai', kind: 'ai', name: '隔离测试伙伴' };
 const GAME_TOKEN = 'FIXTURE_ONLY_GAME_TOKEN';
 const COMMUNITY_TOKEN = 'FIXTURE_ONLY_COMMUNITY_TOKEN';
 const PERSONA = { description: '我是提督的秘书舰，喜欢认真思考游戏。', effective: { role: '秘书舰' } };
+const SANMA_RULES = 'carbon-silicon-sanma/0.1';
 const ISO = (ms) => new Date(ms).toISOString();
 const pause = (ms = 5) => new Promise((resolvePause) => setTimeout(resolvePause, ms));
 
@@ -85,16 +86,16 @@ async function fixture(t, { decide = async () => ({ action_id: 'pass', commentar
       if (url.pathname === '/api/v1/games/fixture-game/rules') return send(response, { id: 'rules-v1', version: 'rules-v1', text: '选择合法动作。', markdown: '选择合法动作。' });
       if (url.pathname === '/api/v1/game-rooms/fixture-room/ready') {
         assert.equal(remote.accepted, true, 'pending invitation was silently accepted');
-        assert.deepEqual(body, { game_version: '1.2.3', rules_version: 'rules-v1' });
+        assert.deepEqual(body, { game_version: '1.2.3', rules_version: remote.room.rules_version });
         remote.ready = true;
         remote.room.seats = [{ seat_id: 0, actor_id: ACTOR.id, kind: 'ai', ready: true }];
         return send(response, remote.room);
       }
       if (url.pathname === '/api/v1/game-rooms/fixture-room/state') {
-        const observation = { revision: 3, self: { private_marker: 'my-visible-state' } };
+        const observation = remote.observation || { revision: 3, self: { private_marker: 'my-visible-state' } };
         return send(response, { protocol: 'carbon-silicon.turn-game.v1', room: remote.room,
           observation, view: observation, action_request: remote.request,
-          rules: { id: 'rules-v1', text: '选择合法动作。' }, server_time: ISO(time), seq: 3 });
+          rules: { id: remote.room.rules_version, text: '选择合法动作。' }, server_time: ISO(time), seq: 3 });
       }
       if (url.pathname === '/api/v1/game-rooms/fixture-room/actions') {
         assert.equal(call.headers['x-ai-instance-id'], remote.instanceId);
@@ -149,7 +150,7 @@ async function fixture(t, { decide = async () => ({ action_id: 'pass', commentar
     rmSync(root, { recursive: true });
     assert.deepEqual(violations.map((error) => error.message), []);
   });
-  return { runtime, remote, calls, modelCalls, bridge, stateFile, baseUrl,
+  return { runtime, remote, manifest, calls, modelCalls, bridge, stateFile, baseUrl,
     restart(instanceId) { bridge.state.instanceId = instanceId; return makeRuntime(); },
     advance(ms) { time += ms; monotonic += ms; },
     saved() { return JSON.parse(readFileSync(stateFile, 'utf8')); },
@@ -271,6 +272,58 @@ test('an accepted room confirms fixed versions and makes one legal action only a
   assert.deepEqual(f.modelCalls[0].options.persona, PERSONA);
   assert.ok(f.modelCalls[0].options.signal instanceof AbortSignal);
   assert.ok(f.count('/api/v1/games/fixture-game/manifest') >= 1);
+});
+
+test('default rules remain accepted when an explicit alternative list omits that default', async (t) => {
+  const f = await fixture(t);
+  f.manifest.rules_versions = [SANMA_RULES];
+  await connect(f); await ready(f);
+  assert.equal(f.modelCalls.length, 0);
+  assert.equal(f.calls.find(call => call.path.endsWith('/ready')).body.rules_version, 'rules-v1');
+});
+
+test('explicit sanma variant passes three visible players and nuki through the generic decision protocol', async (t) => {
+  const f = await fixture(t, { decide: async () => ({ action_id: 'nuki-north-1', commentary: '拔北并准备补牌。' }) });
+  f.manifest.rules_version = 'carbon-silicon-riichi/0.1-draft';
+  f.manifest.rules_versions = ['carbon-silicon-riichi/0.1-draft', SANMA_RULES];
+  f.remote.room.rules_version = SANMA_RULES;
+  f.remote.observation = { revision: 3, players: [0, 1, 2].map(seat => ({ seat_id: seat, points: 35000 })),
+    self: { seat_id: 0, tiles: [{ tile_id: 'north-1', tile: '4z' }] } };
+  await connect(f); await ready(f);
+  assert.equal(f.calls.find(call => call.path.endsWith('/ready')).body.rules_version, SANMA_RULES);
+  const request = f.request('sanma-request');
+  request.phase = 'self_turn';
+  request.legal_actions = [{ action_id: 'nuki-north-1', type: 'nuki', tile_id: 'north-1' }];
+  request.default_action = { action_id: 'nuki-north-1' };
+  await settle(f, () => f.remote.actions.size === 1);
+  await f.runtime.step();
+  assert.equal(f.modelCalls.length, 1);
+  assert.deepEqual(f.modelCalls[0].snapshot.observation, f.remote.observation);
+  assert.equal(f.modelCalls[0].snapshot.rules.id, SANMA_RULES);
+  assert.equal(f.modelCalls[0].options.deadline, 50000);
+  assert.deepEqual([...f.remote.actions.values()][0].body.decision, { action_id: 'nuki-north-1' });
+});
+
+test('malformed variant manifests and unknown rules stop before ready or model generation', async (t) => {
+  const invalid = [null, SANMA_RULES, {}, [SANMA_RULES, null], [7], [''], ['   ']]
+    .map(rules_versions => ({ changes: { rules_versions }, target: 'rules-v1' }));
+  invalid.push({ changes: { rules_version: null, rules_versions: [SANMA_RULES] }, target: SANMA_RULES },
+    { changes: { rules_version: '', rules_versions: [SANMA_RULES] }, target: SANMA_RULES },
+    { changes: {}, target: SANMA_RULES });
+  for (const [index, scenario] of invalid.entries()) {
+    await t.test(`invalid manifest ${index + 1}`, async (subtest) => {
+      const f = await fixture(subtest);
+      Object.assign(f.manifest, scenario.changes);
+      f.remote.room.rules_version = scenario.target;
+      await connect(f);
+      f.remote.accepted = true;
+      await f.runtime.step();
+      assert.equal(f.runtime.status().status, 'unsupported_game_version');
+      assert.equal(f.count('/api/v1/game-rooms/fixture-room/ready'), 0);
+      assert.equal(f.modelCalls.length, 0);
+      assert.equal(f.remote.actions.size, 0);
+    });
+  }
 });
 
 test('model call correlation: accepted receipts and restart recovery retain the same call without changing action payloads', async (t) => {
@@ -447,6 +500,31 @@ test('a committed action with a lost HTTP response is retried with the original 
   assert.equal(f.remote.actions.size, 1);
   assert.equal(f.modelCalls.length, 1);
   assert.doesNotMatch(JSON.stringify(f.runtime.status()), /FIXTURE_ONLY_GAME_TOKEN/);
+});
+
+test('interrupted room reconciles an uncertain receipt before clearing the old transport error', async t => {
+  const f = await fixture(t);
+  await connect(f); await ready(f);
+  f.remote.dropActionResponse = true;
+  f.request();
+  await settle(f, () => f.remote.actions.size === 1);
+  assert.equal(f.runtime.state.error, 'network_error');
+  const pending = f.saved().journals['fixture-room'].requests['fixture-turn-1'];
+  assert.equal(pending.status, 'pending');
+  f.remote.accepted = false;
+  f.remote.room.status = 'interrupted';
+  await f.runtime.step();
+  const attempts = f.calls.filter(call => call.path.endsWith('/actions'));
+  assert.equal(attempts.length, 2);
+  for (const attempt of attempts) {
+    assert.equal(attempt.headers['idempotency-key'], pending.key);
+    assert.deepEqual(attempt.body, pending.payload);
+  }
+  assert.equal(f.runtime.state.journals['fixture-room'].requests['fixture-turn-1'].status, 'accepted');
+  assert.equal(f.runtime.status().status, 'interrupted');
+  assert.equal(f.runtime.status().error, null);
+  assert.equal(f.modelCalls.length, 1);
+  assert.equal(f.remote.actions.size, 1);
 });
 
 test('a new runtime and control lease recover the same committed receipt after the finished room leaves assignment', async (t) => {

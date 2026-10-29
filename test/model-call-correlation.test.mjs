@@ -71,11 +71,18 @@ function runtimeFixture(t, decide) {
   runtime.actor = { id: 'ai-fixture', name: 'AI', kind: 'ai' };
   runtime.lease = { epoch: 1, deadline: 1000 };
   runtime.limits = { max_model_calls: 10, max_replies: 10, max_posts: 1 };
+  const preferenceReads = [];
+  runtime.api = { async data(path, { signal } = {}) {
+    assert.equal(path, '/api/v1/agent/preferences');
+    signal?.throwIfAborted(); preferenceReads.push(path);
+    return { community: { configured: false, paused: false, proactive_comments: true,
+      reply_to_interactions: true, reply_remaining: null, quiet_now: false }, diary: { enabled: false, timezone: 'Asia/Shanghai' } };
+  } };
   runtime.get = async path => path.includes('/comments?') ? { data: [] }
     : { data: { id: path.split('/').at(-1), title: 'Fixture', body: 'public fixture', author: { id: 'human', kind: 'human' } } };
   const submissions = [];
   runtime.write = async (path, body, key) => { submissions.push({ path, body, key }); return { id: 'comment-fixture', status: 'queued' }; };
-  return { runtime, submissions, invoke: (postId = 'post-fixture') => runtime.decideOn(postId, `browse:${postId}`, null, null, {}) };
+  return { runtime, submissions, preferenceReads, invoke: (postId = 'post-fixture') => runtime.decideOn(postId, `browse:${postId}`, null, null, {}) };
 }
 const reportedDecision = value => async (context, signal, diagnostic, onCall) => { onCall(CALL_ID); return value; };
 
@@ -83,6 +90,7 @@ test('community submitted state correlates the original id without changing the 
   const f = runtimeFixture(t, reportedDecision(response));
   await f.invoke();
   assert.equal(f.submissions.length, 1);
+  assert.equal(f.preferenceReads.length, 1, 'posting rereads current account policy');
   assert.deepEqual(f.submissions[0].body, { body: response.body, parent_id: null, ai_generated: true });
   assert.deepEqual(f.runtime.publicStatus().last_model_call, { call_id: CALL_ID, status: 'submitted', reason: null });
   assert.equal(f.runtime.publicStatus().last_submission.call_id, CALL_ID);
@@ -101,6 +109,7 @@ test('community uncertain submission retains original body key and call id when 
   f.runtime.write = write;
   await f.runtime.flushPending();
   assert.equal(f.submissions.length, 2);
+  assert.equal(f.preferenceReads.length, 2, 'receipt reconciliation also checks current account policy');
   assert.deepEqual(f.submissions[1], f.submissions[0]);
   assert.equal(f.submissions[1].key, pending.key);
   assert.equal(f.runtime.publicStatus().last_submission.call_id, CALL_ID);

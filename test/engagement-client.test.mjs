@@ -104,7 +104,7 @@ function fixture(t) {
     if(path==='/api/v1/agent/control/acquire') {if(remote.held)return error('control_busy');remote.held=body.instance_id;remote.claims++;return send(lease());}
     if(path==='/api/v1/agent/control/renew')return send(lease());
     if(path==='/api/v1/agent/control/release') {remote.held=null;remote.releases++;return send({active:false});}
-    if(path==='/api/v1/agent/preferences')return error('not_found',404);
+    if(path==='/api/v1/agent/preferences')return remote.preferences ? send(structuredClone(remote.preferences)) : error('not_found',404);
     if(path==='/api/v1/events')return send([],{next_cursor:'0'});
     if(path==='/api/v1/posts')return send([]);
     if(path==='/api/v1/agent/configuration')return send({actor,persona:{description:'测试伙伴',effective:{}}});
@@ -133,6 +133,31 @@ function fixture(t) {
   t.after(async()=>{runtime.stop();await runtime.settled();assert.ok(resolve(directory).startsWith(ROOT+ '\\'));rmSync(directory,{recursive:true});});
   return {runtime,make,remote};
 }
+
+test('paused companion blocks new social writes while keeping read and retraction tools available', async t => {
+  const f = fixture(t); f.remote.preferences = { community: { paused: true, allow_token_support: true }, diary: {} };
+  for (const args of [support, like, {action:'send_danmaku',post_id:'post-test',at_ms:1200,body:'暂停时不发送'}]) {
+    await assert.rejects(() => f.runtime.engagement(args), {code:'community_paused'});
+  }
+  assert.equal(f.remote.writes.length, 0);
+  assert.deepEqual((await f.runtime.engagement({action:'token_wallet'})).result, wallet);
+  await f.runtime.engagement({...like, liked:false});
+  await f.runtime.engagement({action:'delete_danmaku',post_id:'post-test',danmaku_id:'dm-test'});
+  assert.equal(f.remote.writes.length, 2); assert.equal(f.remote.preferences.community.allow_token_support, true);
+  f.remote.preferences.community.paused = false;
+  await f.runtime.engagement(support); assert.equal(f.remote.accepted.size, 3);
+});
+
+test('pause does not prevent reconciliation of an uncertain engagement with the original key', async t => {
+  const f = fixture(t); f.remote.lost = true;
+  await assert.rejects(() => f.runtime.engagement(support), {code:'network_error'});
+  const key = f.runtime.state.pending_engagement.key;
+  f.remote.preferences = {community:{paused:true},diary:{}};
+  const restarted = f.make();
+  assert.deepEqual((await restarted.engagement({action:'retry_engagement'})).result, supported);
+  assert.equal(f.remote.accepted.size, 1); assert.equal(f.remote.writes.at(-1).key, key);
+  assert.equal(restarted.state.pending_engagement, null);
+});
 
 test('reads do not claim control; single observation never supports, likes or sends danmaku',async t=>{
   const f=fixture(t);f.remote.held='other-controller';
