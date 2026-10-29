@@ -103,3 +103,19 @@ test('hidden card stops UI polling and returns to the same binding when another 
   ui.visibility(false); assert.equal(ui.render(), null); assert.equal(ui.timers.size, 0);
   ui.dispose(); assert.equal(ui.timers.size, 0);
 });
+
+test('chat card distinguishes temporary reconnection from stopped, online and permanent errors', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  state.runtime = { ...state.runtime, state: 'reconnecting', detail: 'network_retry', running: true, stopping: false,
+    reconnect: { attempt: 2, delay_seconds: 5 }, error: null };
+  const ui = page(state); ui.render(); let tree = await ui.settle();
+  let status = find(tree, node => node.props.className === 'tangui-status-orange' && /重连/.test(text(node)));
+  assert.ok(status); assert.match(text(status), /连接中断/); assert.doesNotMatch(text(status), /停止|在线|正在观察/);
+  assert.doesNotMatch(text(tree), /需要处理/);
+  state.runtime = { ...state.runtime, state: 'observing', detail: 'waiting', reconnect: null }; ui.setState(state); tree = await ui.poll();
+  assert.ok(find(tree, node => node.props.className === 'tangui-status-blue' && /正在观察社区/.test(text(node))));
+  assert.ok(!find(tree, node => node.props.className === 'tangui-status-orange' && /重连/.test(text(node))));
+  state.runtime = { ...state.runtime, state: 'reconnecting', stopping: true }; ui.setState(state); tree = await ui.poll();
+  assert.ok(find(tree, node => node.props.className === 'tangui-status-gray' && /社区正在停止/.test(text(node))));
+  ui.dispose();
+});

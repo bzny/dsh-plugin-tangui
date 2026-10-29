@@ -8,6 +8,18 @@ import { RuntimeConnection } from '../lib/runtime-connection.js';
 import { GameRuntime } from '../lib/game-runtime.js';
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
+test('GMT dropdown identifiers preserve DSH quiet-hour fallback semantics', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-29T18:30:00Z') });
+  for (let hours = -12; hours <= 14; hours++) {
+    const timezone = hours === 8 ? 'Asia/Shanghai' : hours === 0 ? 'UTC' : `Etc/GMT${hours > 0 ? '-' : '+'}${Math.abs(hours)}`;
+    const currentHour = ((18 + hours) % 24 + 24) % 24;
+    const preferences = { community: { configured: true, quiet_start: '22:00', quiet_end: '06:00' }, diary: { timezone } };
+    const runtime = { preferences, state: { model_calls: 0 }, limits: { max_model_calls: 10 } };
+    assert.equal(CommunityRuntime.prototype.communityAllowed.call(runtime), !(currentHour >= 22 || currentHour < 6), timezone);
+    preferences.community.quiet_now = true;
+    assert.equal(CommunityRuntime.prototype.communityAllowed.call(runtime), false, 'server clock remains authoritative');
+  }
+});
 async function until(check) { for (let i = 0; i < 600; i++) { if (check()) return; await pause(10); } throw new Error('fixture timeout'); }
 function fixture(t, { game = false, accept = false, preferences = {}, decision = { participate: false, body: '', reflection: '想和提督再聊聊这个。' } } = {}) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work'); mkdirSync(root, { recursive: true });

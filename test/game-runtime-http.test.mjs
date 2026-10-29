@@ -187,6 +187,44 @@ async function settle(f, predicate) {
   assert.equal(Boolean(predicate()), true, 'runtime did not reach the expected isolated state');
 }
 
+test('shared community recovery rereads the game and discards a decision past its original deadline', async t => {
+  let finish;
+  const f = await fixture(t, { decide: () => new Promise(resolve => { finish = resolve; }) });
+  await connect(f); await ready(f); f.request();
+  await settle(f, () => !!finish);
+  const game = f.runtime, oldDeadline = game.active.deadline;
+  let recovered = 0;
+  const owner = {
+    instanceId: f.bridge.state.instanceId, lease: game.lease, abort: new AbortController(),
+    recoverable: () => true,
+    checkActive() { assert.ok(game.monotonic() < this.lease.deadline); },
+    connectionReady: async () => {},
+    proof() { this.checkActive(); return { 'X-AI-Instance-ID': this.instanceId, 'X-AI-Control-Epoch': String(this.lease.epoch) }; },
+    async recoverConnection() {
+      recovered++; f.advance(40000);
+      finish({ action_id: 'pass', commentary: '旧回合结果' });
+      await game.active.promise;
+      this.lease = { ...this.lease, deadline: game.monotonic() + 60000 };
+    },
+  };
+  game.sessionOwner = owner; game.ownerAbort = () => game.abort.abort();
+  const originalFetch = game.fetch;
+  let failNext = true;
+  game.fetch = (...args) => {
+    if (failNext) { failNext = false; throw new TypeError('fixture disconnected socket'); }
+    return originalFetch(...args);
+  };
+  await game.step();
+  assert.equal(recovered, 1); assert.equal(game.busy, true);
+  assert.equal(game.active.deadline, oldDeadline);
+  assert.equal(f.remote.actions.size, 0);
+  await game.step();
+  assert.equal(f.modelCalls.length, 1);
+  assert.equal(f.remote.actions.size, 0);
+  assert.equal(f.saved().journals['fixture-room'].requests['fixture-turn-1'].status, 'discarded_late');
+  assert.equal(f.saved().journals['fixture-room'].requests['fixture-turn-1'].reason, 'expired');
+});
+
 test('game access pairs separately and a pending invitation never triggers accept, ready or model calls', async (t) => {
   const f = await fixture(t);
   await connect(f);

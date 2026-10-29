@@ -39,6 +39,18 @@ window.__ModuleLoader__.load({
 
     const SESSION_STATUS_CSS = '.tangui-session-status{--tangui-blue:#1769aa;--tangui-green:#237a46;--tangui-orange:#925400;--tangui-red:#bd3030;--tangui-gray:#687482}.tangui-status-blue{color:var(--tangui-blue)}.tangui-status-green{color:var(--tangui-green)}.tangui-status-orange{color:var(--tangui-orange)}.tangui-status-red{color:var(--tangui-red)}.tangui-status-gray{color:var(--tangui-gray)}@media(prefers-color-scheme:dark){.tangui-session-status{--tangui-blue:#73b9f2;--tangui-green:#75cf96;--tangui-orange:#efb15e;--tangui-red:#ff8b8b;--tangui-gray:#a5afba}}html[data-ds-theme-source="light"] .tangui-session-status,[data-theme="light"] .tangui-session-status,.light .tangui-session-status{--tangui-blue:#1769aa;--tangui-green:#237a46;--tangui-orange:#925400;--tangui-red:#bd3030;--tangui-gray:#687482}body[data-ds-dark-theme] .tangui-session-status,[data-theme="dark"] .tangui-session-status,.dark .tangui-session-status{--tangui-blue:#73b9f2;--tangui-green:#75cf96;--tangui-orange:#efb15e;--tangui-red:#ff8b8b;--tangui-gray:#a5afba}';
 
+    function reconnectSummary(runtime) {
+      if (!runtime?.running || runtime.stopping || runtime.state !== 'reconnecting' || runtime.detail !== 'network_retry') return null;
+      const attempt = runtime.reconnect?.attempt;
+      const delay = runtime.reconnect?.delay_seconds;
+      const retry = Number.isInteger(attempt) && attempt > 0 ? `第 ${attempt} 次重试` : '';
+      const wait = Number.isFinite(delay) && delay >= 0 ? `本轮等待 ${delay} 秒` : '';
+      return {
+        label: wait && delay > 0 ? '连接中断，等待重连' : '连接中断，正在重连',
+        detail: [retry, wait].filter(Boolean).join(' · '),
+      };
+    }
+
     function activitySummary(state) {
       const entry = state.modelLogs?.at(-1);
       const runtime = state.runtime || {};
@@ -53,9 +65,10 @@ window.__ModuleLoader__.load({
         resultTone = runtime.last_submission.status === 'queued' ? 'orange' : 'green';
       }
       const error = runtime.error?.message || state.runtimeConnection?.error?.message || state.error?.message || state.runtimeInitializationError || '';
+      const reconnect = reconnectSummary(runtime);
       return {
-        runtime: runtime.stopping ? '社区正在停止' : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
-        runtimeTone: runtime.stopping ? 'gray' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
+        runtime: runtime.stopping ? '社区正在停止' : reconnect ? [reconnect.label, reconnect.detail].filter(Boolean).join(' · ') : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
+        runtimeTone: runtime.stopping ? 'gray' : reconnect ? 'orange' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
         model: entry ? `${purpose} · ${stage}${Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : ''}${result ? ` · ${result}` : ''}` : '尚无模型调用记录',
         modelPrefix: entry ? `${purpose} · ` : '',
         modelStage: entry ? stage : '',
@@ -229,7 +242,7 @@ window.__ModuleLoader__.load({
         h('label', { style: { display: 'block', margin: '12px 0' } }, h('input', { type: 'checkbox', checked: update.auto, disabled: busy || !!update.storageError,
           onChange: event => void action({ action: 'update_auto', enabled: event.target.checked }) }), ' 自动检查并在任务结束后更新'),
         h('p', { style: { fontSize: '14px' } }, development ? `${reasons.development_check_only} 请按仓库说明手动更新。` : update.mode !== 'managed' ? `${reasons.host_check_only} 请按仓库说明手动更新。` :
-          '每 6 小时检查本插件的 GitHub 正式版本。更新等待碳硅任务结束，不会重启整个 DSH；保留绑定、人设、授权和预算。'),
+          '每小时自动检查本插件的 GitHub 正式版本；北京时间 01:00–07:00 暂停自动检查，可随时手动检查。更新等待碳硅任务结束，不会重启整个 DSH；保留绑定、人设、授权和预算。'),
         update.reason && reasons[update.reason] && reasons[update.reason] !== installNote && !(waitingNote && update.reason === 'runtime_busy') && h('p', { role: 'status' }, reasons[update.reason]),
         update.error && h('p', { role: 'alert' }, errors[update.error] || reasons[update.error] || '此次更新未完成，可重试检查；具体状态见上方。'),
         update.storageError && h('p', { role: 'alert' }, '更新设置未能保存，请检查本机插件更新状态文件；原文件保留。'),
@@ -294,8 +307,9 @@ window.__ModuleLoader__.load({
         const link = document.createElement('a'); link.href = url; link.download = `community-activity-${cursor}.${format === 'markdown' ? 'md' : 'json'}`; link.click(); URL.revokeObjectURL(url);
       };
       const active = runtime.running || runtime.stopping;
-      const label = { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
-      const detail = { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
+      const reconnect = reconnectSummary(runtime);
+      const label = runtime.stopping ? '正在停止' : reconnect?.label || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
+      const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
         writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
@@ -303,10 +317,11 @@ window.__ModuleLoader__.load({
       const button = (text, payload, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || disabled, onClick: () => void action(payload) }, text);
       const field = (text, value, update, type = 'text') => h('label', { style: { display: 'block', margin: '10px 0' } }, text,
         h('input', { style: inputStyle, type, value, disabled: busy || active, onChange: e => update(type === 'number' ? Number(e.target.value) : e.target.value) }));
-      return h('div', { style: { margin: '24px 0', padding: '18px', border: '1px solid var(--dsw-alias-border-l2, #888)', borderRadius: '12px' } },
+      return h('div', { className: 'tangui-session-status', style: { margin: '24px 0', padding: '18px', border: '1px solid var(--dsw-alias-border-l2, #888)', borderRadius: '12px' } },
+        h('style', null, SESSION_STATUS_CSS),
         h('h3', { style: { marginTop: 0 } }, '社区运行'),
         h('p', null, '人设接入后，在这里让伙伴浏览帖子、判断是否参与，并回复发给它的消息。使用 DSH 当前默认模型，可能产生调用费用。'),
-        h('p', { role: 'status' }, h('strong', null, label), ' · ', detail),
+        h('p', { role: 'status', className: reconnect ? 'tangui-status-orange' : undefined }, h('strong', null, label), detail ? ' · ' : '', detail),
         (runtime.error || connection.error) && h('p', { role: 'alert', style: { color: '#d54949' } }, runtime.error?.message || connection.error?.message),
         !state.binding && h('p', null, '请先完成下方账号接入。'),
         connection.binding && h('p', null, '同一账号连接用于人设、社区、小游戏和日记。',

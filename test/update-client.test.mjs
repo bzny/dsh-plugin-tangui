@@ -176,3 +176,47 @@ test('busy installation tells manual and automatic users the correct next step',
   const automatic = await renderUpdatePanel({ state: 'waiting_idle', reason: 'runtime_busy', auto: true });
   assert.match(visibleText(automatic.tree), /自动更新|自动安装/);
 });
+
+async function renderRuntime(overrides = {}) {
+  const state = fixture(); state.runtime = { ...state.runtime, state: 'reconnecting', detail: 'network_retry', running: true,
+    stopping: false, error: null, reconnect: { attempt: 2, delay_seconds: 5 }, ...overrides };
+  const ui = page(new Map(), state), section = await renderSection(ui);
+  const component = find(section, node => typeof node.type === 'function' && node.type.name === 'RuntimePanel'); assert.ok(component);
+  const calls = [];
+  const tree = ui.mount(component.type, { ...component.props, state, busy: false, action: value => calls.push(JSON.parse(JSON.stringify(value))) }).render();
+  return { tree, calls };
+}
+
+test('temporary reconnection is orange, keeps stop enabled and prevents duplicate starts', async () => {
+  const { tree, calls } = await renderRuntime();
+  const status = find(tree, node => String(node.props.className || '').includes('tangui-status-orange') && /重连/.test(visibleText(node)));
+  assert.ok(status); assert.match(visibleText(status), /连接中断/);
+  assert.ok(String(tree.props.className || '').includes('tangui-session-status'), 'status color variables are defined on the runtime panel');
+  assert.doesNotMatch(visibleText(status), /已获得控制权|正在观察|已停止|在线/);
+  assert.match(visibleText(tree), /2.*重试|重试.*2/); assert.match(visibleText(tree), /5.*秒/);
+  const stop = find(tree, node => node.type === 'button' && node.children.includes('停止运行')); assert.ok(stop); assert.equal(stop.props.disabled, false);
+  stop.props.onClick(); assert.deepEqual(calls, [{ action: 'runtime_stop' }]);
+  for (const label of ['浏览一次', '持续观察']) assert.equal(find(tree, node => node.type === 'button' && node.children.includes(label)).props.disabled, true);
+});
+
+test('stopping remains a user-stop state rather than an active retry', async () => {
+  const { tree } = await renderRuntime({ stopping: true });
+  const stop = find(tree, node => node.type === 'button' && node.children.includes('正在停止…')); assert.ok(stop); assert.equal(stop.props.disabled, true);
+  assert.ok(!find(tree, node => String(node.props.className || '').includes('tangui-status-orange') && /重连/.test(visibleText(node))));
+  assert.doesNotMatch(visibleText(tree), /network_retry|reconnecting/);
+});
+
+test('invalid optional retry metadata does not fabricate a retry count or countdown', async () => {
+  const { tree } = await renderRuntime({ reconnect: { attempt: -1, delay_seconds: NaN } });
+  assert.match(visibleText(tree), /重连/); assert.doesNotMatch(visibleText(tree), /NaN|undefined|第 -1|等待 -1/);
+});
+
+test('hourly update schedule explains Beijing quiet hours without disabling manual checks', async () => {
+  const { tree, calls } = await renderUpdatePanel({ state: 'current', candidate: null, canInstall: false });
+  assert.match(visibleText(tree), /每小时|每 1 小时/);
+  assert.match(visibleText(tree), /北京时间.*01:00.*07:00.*暂停自动检查/);
+  assert.match(visibleText(tree), /随时.*手动检查|手动检查.*随时/);
+  assert.doesNotMatch(visibleText(tree), /每 6 小时/);
+  const check = find(tree, node => node.type === 'button' && node.children.includes('检查更新')); assert.ok(check); assert.equal(check.props.disabled, false);
+  check.props.onClick(); assert.deepEqual(calls, [{ action: 'update_check' }]);
+});

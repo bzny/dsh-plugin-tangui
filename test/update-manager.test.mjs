@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { UpdateManager, compareVersions, UPDATE_INTERVAL_MS } from '../lib/update-manager.js';
+import { UpdateManager, compareVersions, UPDATE_INTERVAL_MS, isUpdateQuietHours } from '../lib/update-manager.js';
 
 const commit = '1'.repeat(40), tagSha = '2'.repeat(40);
 const api = 'https://api.github.com/repos/bzny/dsh-plugin-tangui';
@@ -39,7 +39,7 @@ function hostFixture(overrides = {}) {
   return { host, calls, setActive: value => { active = value; } };
 }
 function manager(options = {}) {
-  return new UpdateManager({ currentVersion: '0.4.0', currentManifest: baseline, mode: 'managed', ...options });
+  return new UpdateManager({ currentVersion: '0.4.0', currentManifest: baseline, mode: 'managed', now: () => 100, ...options });
 }
 
 test('numeric semver ordering is strict and prerelease/build syntax is not stable', () => {
@@ -155,7 +155,7 @@ test('manual install uses the displayed fixed candidate without enabling automat
 test('manual install rejects stale targets and concurrent clicks without duplicate writes', async () => {
   const host = hostFixture(), m = manager({ ...fixture(), host: host.host, auto: false });
   assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_candidate_changed' });
-  await m.check({ install: false });
+  await m.check({ install: false, manual: true });
   assert.throws(() => m.install({ version: '0.4.2', commit }), { code: 'update_candidate_changed' });
   assert.throws(() => m.install({ version: '0.4.1', commit: '3'.repeat(40) }), { code: 'update_candidate_changed' });
   assert.equal(host.calls.length, 0);
@@ -167,7 +167,7 @@ test('manual install rejects stale targets and concurrent clicks without duplica
 test('manual install respects active tasks and does not silently queue while auto is off', async () => {
   let busy = true; const host = hostFixture({ tryAcquireIdleLock() { return busy ? null : () => {}; } });
   const m = manager({ ...fixture(), host: host.host, auto: false });
-  await m.check({ install: false });
+  await m.check({ install: false, manual: true });
   assert.equal((await m.install({ version: '0.4.1', commit })).state, 'waiting_idle');
   assert.equal(host.calls.length, 0); busy = false;
   await m.tick(); assert.equal(host.calls.length, 0);
@@ -177,13 +177,13 @@ test('manual install respects active tasks and does not silently queue while aut
 test('manual entry keeps development, unsupported-host and restart conditions intact', async () => {
   for (const [mode, supported, reason] of [['development', true, 'development_check_only'], ['managed', false, 'host_check_only']]) {
     const host = hostFixture(), m = manager({ ...fixture(), mode, host: supported ? host.host : null, auto: false });
-    await m.check({ install: false }); assert.equal(m.canInstall(), false);
+    await m.check({ install: false, manual: true }); assert.equal(m.canInstall(), false);
     assert.equal((await m.install({ version: '0.4.1', commit })).reason, reason);
     assert.equal(host.calls.length, 0);
   }
   const host = hostFixture({ async install() { host.calls.push('install'); return { restartRequired: true }; } });
   const m = manager({ ...fixture(), host: host.host, auto: false });
-  await m.check({ install: false }); await m.install({ version: '0.4.1', commit });
+  await m.check({ install: false, manual: true }); await m.install({ version: '0.4.1', commit });
   assert.equal(m.canInstall(), false);
   assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_restart_required' });
   assert.equal(host.calls.filter(x => x === 'install').length, 1);
@@ -192,7 +192,7 @@ test('manual entry keeps development, unsupported-host and restart conditions in
 test('failed manual install rolls back once and requires a new explicit check before retry', async () => {
   const host = hostFixture({ async install() { host.calls.push('install'); throw Error('failed'); } });
   const m = manager({ ...fixture(), host: host.host, auto: false });
-  await m.check({ install: false });
+  await m.check({ install: false, manual: true });
   assert.equal((await m.install({ version: '0.4.1', commit })).state, 'rolled_back');
   assert.equal(m.canInstall(), false);
   assert.throws(() => m.install({ version: '0.4.1', commit }), { code: 'update_retry_requires_check' });
@@ -292,6 +292,7 @@ test('activation mismatch triggers recovery and backup failure does not mutate i
 });
 
 test('interval, persistence and concurrent calls share one operation', async () => {
+  assert.equal(UPDATE_INTERVAL_MS, 60 * 60 * 1000);
   let now = 100; const changes = [], net = fixture({ release: { tag_name: 'v0.4.0' } });
   const m = manager({ ...net, now: () => now, onChange: state => changes.push(state) });
   await Promise.all([m.tick(), m.check(), m.tick()]); assert.equal(net.calls.length, 1);
@@ -302,4 +303,106 @@ test('interval, persistence and concurrent calls share one operation', async () 
   assert.equal(restored.status().auto, false); assert.ok(changes.length > 0);
   assert.equal(manager({ initialState: { pendingVersion: '0.4.1' } }).status().state, 'restarting_needed');
   assert.equal(manager({ currentVersion: '0.4.1', initialState: { pendingVersion: '0.4.1' } }).status().state, 'updated');
+});
+
+test('quiet hours use Beijing time with inclusive 01:00 and exclusive 07:00 boundaries', () => {
+  for (const [utc, expected] of [
+    ['2026-10-28T16:59:59.999Z', false],
+    ['2026-10-28T17:00:00.000Z', true],
+    ['2026-10-28T22:59:59.999Z', true],
+    ['2026-10-28T23:00:00.000Z', false],
+    ['2026-10-29T00:00:00.000Z', false],
+  ]) assert.equal(isUpdateQuietHours(Date.parse(utc)), expected, utc);
+});
+
+test('automatic checks stay silent overnight and overdue work resumes at 07:00', async () => {
+  let now = Date.parse('2026-10-29T01:00:00+08:00');
+  const net = fixture({ release: { tag_name: 'v0.4.0' } });
+  const m = manager({ ...net, now: () => now });
+  await m.check(); await m.tick();
+  assert.equal(net.calls.length, 0); assert.equal(m.status().lastCheck, null);
+  now = Date.parse('2026-10-29T06:59:59.999+08:00');
+  await m.tick(); assert.equal(net.calls.length, 0);
+  now++; await m.tick();
+  assert.equal(net.calls.length, 1); assert.equal(m.status().lastCheck, now);
+  now += UPDATE_INTERVAL_MS - 1; await m.tick(); assert.equal(net.calls.length, 1);
+  now++; await m.tick(); assert.equal(net.calls.length, 2);
+});
+
+test('manual checks and installs remain available overnight without enabling auto', async () => {
+  const net = fixture(), host = hostFixture();
+  const m = manager({ ...net, host: host.host, auto: false, now: () => Date.parse('2026-10-29T03:00:00+08:00') });
+  await m.check(); await m.tick(); assert.equal(net.calls.length, 0);
+  assert.equal((await m.check({ manual: true, install: false })).state, 'available');
+  assert.equal(m.canInstall(), true); assert.equal(net.calls.length, 3);
+  const result = await m.install({ version: '0.4.1', commit });
+  assert.equal(result.state, 'updated'); assert.equal(result.auto, false);
+  assert.equal(host.calls.filter(value => value === 'install').length, 1);
+});
+
+test('a candidate waiting for idle cannot install during quiet hours', async () => {
+  let now = Date.parse('2026-10-29T00:30:00+08:00'), busy = true;
+  const host = hostFixture({ tryAcquireIdleLock() { host.calls.push('lock'); return busy ? null : () => host.calls.push('release'); } });
+  const net = fixture(), m = manager({ ...net, host: host.host, now: () => now });
+  assert.equal((await m.check()).state, 'waiting_idle');
+  now = Date.parse('2026-10-29T01:00:00+08:00'); busy = false;
+  await m.tick(); assert.deepEqual(host.calls, ['lock']); assert.equal(net.calls.length, 3);
+  now = Date.parse('2026-10-29T07:00:00+08:00');
+  assert.equal((await m.tick()).state, 'updated'); assert.equal(net.calls.length, 6);
+});
+
+test('automatic candidate validation defers further requests when the clock crosses 01:00', async () => {
+  let now = Date.parse('2026-10-29T00:59:59+08:00'), crossBoundary = true;
+  const net = fixture(), host = hostFixture();
+  const m = manager({ host: host.host, now: () => now, fetchImpl: async (url, options) => {
+    const result = await net.fetchImpl(url, options);
+    if (crossBoundary) { now = Date.parse('2026-10-29T01:00:00+08:00'); crossBoundary = false; }
+    return result;
+  } });
+  const result = await m.check();
+  assert.equal(result.state, 'current'); assert.equal(result.error, null); assert.equal(result.lastCheck, null);
+  assert.equal(result.latest, null); assert.equal(net.calls.length, 1); assert.deepEqual(host.calls, []);
+  now = Date.parse('2026-10-29T07:00:00+08:00');
+  assert.equal((await m.tick()).state, 'updated'); assert.equal(net.calls.length, 4);
+});
+
+test('metadata completed at 01:00 does not trigger automatic installation until 07:00', async () => {
+  let now = Date.parse('2026-10-29T00:59:59+08:00'), crossBoundary = true;
+  const net = fixture(), host = hostFixture();
+  const m = manager({ host: host.host, now: () => now, fetchImpl: async (url, options) => {
+    const result = await net.fetchImpl(url, options);
+    if (url === raw && crossBoundary) { now = Date.parse('2026-10-29T01:00:00+08:00'); crossBoundary = false; }
+    return result;
+  } });
+  assert.equal((await m.check()).state, 'available'); assert.deepEqual(host.calls, []);
+  now = Date.parse('2026-10-29T07:00:00+08:00');
+  assert.equal((await m.tick()).state, 'updated'); assert.equal(net.calls.length, 6);
+});
+
+test('available candidates still check for newer releases once per hour', async () => {
+  let now = Date.parse('2026-10-29T10:00:00+08:00');
+  const net = fixture(), m = manager({ ...net, mode: 'development', now: () => now });
+  await m.tick(); assert.equal(net.calls.length, 3);
+  now += UPDATE_INTERVAL_MS - 1; await m.tick(); assert.equal(net.calls.length, 3);
+  now++; await m.tick(); assert.equal(net.calls.length, 6);
+});
+
+test('automatic installation rechecks quiet hours after taking the idle lock', async () => {
+  let now = Date.parse('2026-10-29T00:59:59+08:00');
+  const host = hostFixture({ tryAcquireIdleLock() {
+    host.calls.push('lock'); now = Date.parse('2026-10-29T01:00:00+08:00');
+    return () => host.calls.push('release');
+  } });
+  const m = manager({ ...fixture(), host: host.host, now: () => now });
+  assert.equal((await m.check()).state, 'available'); assert.deepEqual(host.calls, ['lock', 'release']);
+});
+
+test('installation already started before quiet hours completes its transaction', async () => {
+  let now = Date.parse('2026-10-29T00:59:59+08:00');
+  const host = hostFixture({ async snapshot() {
+    host.calls.push('snapshot'); now = Date.parse('2026-10-29T01:00:00+08:00'); return { version: '0.4.0' };
+  } });
+  const m = manager({ ...fixture(), host: host.host, now: () => now });
+  assert.equal((await m.check()).state, 'updated');
+  assert.deepEqual(host.calls, ['lock', 'snapshot', 'install', 'activate', 'version', 'release']);
 });
