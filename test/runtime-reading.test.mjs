@@ -22,6 +22,8 @@ function fixture(t, count = 4) {
     if (path === '/api/v1/capabilities') return send({features:{reading_after:true,discovery:true}});
     if (path === '/api/v1/agent/preferences') return send({community:{configured:true,paused:!!remote.paused,proactive_comments:true,reply_to_interactions:true,keywords:'不会命中的旧关键词',reply_remaining:null},diary:{timezone:'Asia/Shanghai'}});
     if (path === '/api/v1/agent/configuration') return send({actor,persona});
+    if (path === '/api/v1/images/policy') return send({default_pack_id:'pack_default'});
+    if (path === '/api/v1/stickers/packs/pack_default') return send({id:'pack_default',official:true,title:'默认',items:remote.stickers || []});
     if (path === '/api/v1/agent/control/acquire') return send({actor_id:actor.id,active:true,owned_by_current_grant:true,epoch:1,server_time:new Date().toISOString(),expires_at:new Date(Date.now()+60000).toISOString()});
     if (path === '/api/v1/agent/control/release') return send({active:false});
     if (path === '/api/v1/events') return send(remote.events,{next_cursor:remote.events.at(-1)?.id || '0'});
@@ -51,7 +53,7 @@ function fixture(t, count = 4) {
     const runtime = new CommunityRuntime({directory,connection:{binding:()=>binding},fetchImpl,decide:async context => {
       remote.contexts.push(context); const participate = typeof remote.participate === 'function' ? remote.participate(context) : remote.participate;
       if(remote.afterModel) await remote.afterModel(runtime);
-      return {participate,body:participate ? '具体补充' : '',reflection:remote.reflection || '',decision_note:participate ? '回答具体问题' : '已有同一观点，不重复回应'};
+      return {participate,body:participate ? '具体补充' : '',...(remote.attachments ? {attachments:remote.attachments} : {}),reflection:remote.reflection || '',decision_note:participate ? '回答具体问题' : '已有同一观点，不重复回应'};
     }}); instances.push(runtime); return runtime;
   };
   const run = async (runtime,options={}) => { runtime.start(options); await runtime.settled(); return runtime.publicStatus(); };
@@ -122,12 +124,13 @@ test('legacy browse skips can answer a human mention, but a durable successful r
   }
 });
 
-test('a pending media context does not starve later pages and is read once when ready',async t=>{
+test('video posts are retired without models or media requests and later text pages continue',async t=>{
   const f=fixture(t,4), runtime=f.make(); f.remote.mediaPending.add('post-1');
   for(let i=0;i<5;i++)await f.run(runtime);
   assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2','post-3','post-4']); assert.equal(runtime.state.reading_cursor,'4');
-  assert.deepEqual(runtime.state.reading_waiting,['post-1']); f.remote.mediaPending.clear(); await f.run(runtime); await f.run(runtime);
-  assert.equal(f.remote.contexts.filter(c=>c.post.id==='post-1').length,1); assert.deepEqual(runtime.state.reading_waiting,[]);
+  assert.ok(runtime.state.completed.includes('browse:post-1')); f.remote.mediaPending.clear(); await f.run(runtime); await f.run(runtime);
+  assert.equal(f.remote.contexts.filter(c=>c.post.id==='post-1').length,0);
+  assert.ok(!f.remote.calls.some(c=>c.path.includes('/media/')));
 });
 
 test('invalid pagination preserves the prior cursor without invoking the model',async t=>{
@@ -135,43 +138,43 @@ test('invalid pagination preserves the prior cursor without invoking the model',
   assert.equal(runtime.publicStatus().error.code,'invalid_reading_cursor'); assert.equal(runtime.state.reading_cursor,undefined); assert.equal(f.remote.contexts.length,0);
 });
 
-test('a waiting video mention is saved while later interactions continue, survives restart and is handled once when ready',async t=>{
+test('legacy waiting video mentions retire while later interactions continue across restart',async t=>{
   const f=fixture(t,2); f.remote.mediaPending.add('post-1');
   f.remote.events=[mention(1),{...mention(2),post_id:'post-2',resource_id:'post-2'}];
-  const first=f.make(); await f.run(first);
+  const first=f.make();first.commit({cursor:'1',waiting_events:[mention(1)],reading_waiting:['post-1']}); await f.run(first);await f.run(first);
   assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2']);
-  assert.equal(first.state.cursor,'2'); assert.equal(first.publicStatus().observation.waiting_video_events,1);
+  assert.equal(first.state.cursor,'2'); assert.equal(first.publicStatus().observation.waiting_events,0);
   const saved=JSON.parse(readFileSync(first.stateFile,'utf8'));
-  assert.deepEqual(saved.waiting_events.map(e=>e.id),['1']);
+  assert.deepEqual(saved.waiting_events,[]);
   const resumed=f.make(); await f.run(resumed);
   assert.equal(f.remote.contexts.length,1); assert.equal(resumed.publicStatus().observation.last_check.model_calls,0);
   f.remote.mediaPending.clear(); await f.run(resumed); await f.run(f.make());
-  assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2','post-1']);
+  assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2']);
   assert.equal(f.remote.contexts.at(-1).trigger.kind,'human_mention');
-  assert.equal(f.remote.contexts.at(-1).post.video_material[0].frames.length,1);
+  assert.ok(!f.remote.calls.some(c=>c.path.includes('/media/')));
   assert.equal(resumed.state.cursor,'2'); assert.deepEqual(resumed.state.waiting_events,[]);
 });
 
-test('deferred duplicate mentions share a decision and a removed video retires without model work',async t=>{
+test('duplicate video mentions retire without model work and never reenter the waiting queue',async t=>{
   const f=fixture(t,2); f.remote.mediaPending.add('post-1'); f.remote.events=[mention(1),mention(2)];
-  await f.run(f.make()); assert.equal(f.remote.contexts.length,1); // unrelated second post
-  const runtime=f.make(); assert.equal(runtime.state.waiting_events.length,2);
+  const runtime=f.make();await f.run(runtime);await f.run(runtime);await f.run(runtime); assert.equal(f.remote.contexts.length,1); // unrelated second post
+  assert.equal(runtime.state.waiting_events?.length || 0,0);
   f.remote.mediaPending.clear(); await f.run(runtime); await f.run(runtime);
-  assert.equal(f.remote.contexts.filter(c=>c.post.id==='post-1').length,1);
-  assert.deepEqual(runtime.state.waiting_events,[]);
+  assert.equal(f.remote.contexts.filter(c=>c.post.id==='post-1').length,0);
+  assert.equal(runtime.state.waiting_events?.length || 0,0);
   const other=fixture(t,1); other.remote.mediaPending.add('post-1'); other.remote.events=[mention(1)];
-  await other.run(other.make()); other.remote.posts=[];
+  const legacy=other.make();legacy.commit({waiting_events:[mention(1)],cursor:'1'});other.remote.posts=[];
   const restarted=other.make(); await other.run(restarted);
   assert.equal(other.remote.contexts.length,0); assert.deepEqual(restarted.state.waiting_events,[]);
 });
 
-test('waiting video interactions respect changed account policy and resume with their original trigger',async t=>{
+test('legacy waiting interactions respect pause then retire disabled videos without model work',async t=>{
   const f=fixture(t,1); f.remote.mediaPending.add('post-1'); f.remote.events=[mention(1)];
-  await f.run(f.make()); f.remote.mediaPending.clear(); f.remote.paused=true;
+  const old=f.make();old.commit({waiting_events:[mention(1)],cursor:'1'});f.remote.paused=true;
   const runtime=f.make(); await f.run(runtime);
   assert.equal(f.remote.contexts.length,0); assert.equal(runtime.state.waiting_events.length,1);
   f.remote.paused=false; await f.run(runtime);
-  assert.equal(f.remote.contexts.length,1); assert.equal(f.remote.contexts[0].trigger.kind,'human_mention');
+  assert.equal(f.remote.contexts.length,0);assert.deepEqual(runtime.state.waiting_events,[]);
 });
 
 test('a complete answer reaches disk before connection recovery; a new instance reuses its body and key',async t=>{
@@ -215,11 +218,27 @@ test('empty checks expose zero calls, new interactions expose the reason and inc
   assert.equal(f.remote.contexts.length,1,'loading status must not launch model work');
 });
 
-test('failed deferred-event persistence cannot advance the cursor or lose the notification',async t=>{
+test('failed disabled-video retirement cannot advance the cursor or lose the notification',async t=>{
   const f=fixture(t,1); f.remote.mediaPending.add('post-1'); f.remote.events=[mention(1)];
   const runtime=f.make(), commit=runtime.commit.bind(runtime);
-  runtime.commit=patch=>{if(patch.waiting_events)throw new Error('simulated storage failure'); return commit(patch);};
+  runtime.commit=patch=>{if(patch.completed)throw new Error('simulated storage failure'); return commit(patch);};
   await f.run(runtime); assert.equal(runtime.state.cursor,'0'); assert.equal(f.remote.contexts.length,0);
   const restarted=f.make(); await f.run(restarted);
-  assert.equal(restarted.state.cursor,'1'); assert.deepEqual(restarted.state.waiting_events.map(e=>e.id),['1']);
+  assert.equal(restarted.state.cursor,'1'); assert.ok(restarted.state.completed.includes('event:1'));assert.equal(restarted.state.waiting_events?.length || 0,0);
+});
+
+test('autonomous reply may choose an offered sticker in the same call and persisted comment payload',async t=>{
+  const f=fixture(t,1);f.remote.participate=true;
+  f.remote.stickers=[{id:'sticker_wave',label:'挥手',available:true}];f.remote.attachments=[{type:'sticker',id:'sticker_wave'}];
+  const runtime=f.make();await f.run(runtime);await f.run(runtime);
+  assert.equal(f.remote.contexts.length,1);assert.equal(runtime.state.model_calls,1);
+  assert.deepEqual(f.remote.contexts[0].available_stickers,[{id:'sticker_wave',label:'挥手',pack_title:'默认'}]);
+  assert.equal(f.remote.accepted.size,1);assert.deepEqual(f.remote.writes.at(-1).body.attachments,f.remote.attachments);
+  assert.equal(runtime.state.replies,1);
+});
+
+test('unoffered or fabricated model sticker is rejected without publishing or another model call',async t=>{
+  const f=fixture(t,1);f.remote.participate=true;f.remote.stickers=[{id:'sticker_wave',label:'挥手',available:true}];
+  f.remote.attachments=[{type:'sticker',id:'sticker_forged'}];const runtime=f.make();await f.run(runtime);
+  assert.equal(runtime.publicStatus().error.code,'invalid_model_decision');assert.equal(runtime.state.model_calls,1);assert.equal(f.remote.writes.length,0);
 });

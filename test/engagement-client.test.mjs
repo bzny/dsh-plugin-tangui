@@ -24,12 +24,12 @@ test('strict engagement inputs reject coercions and invalid Unicode lengths', ()
     ...[['from_ms',null],['from_ms',true],['cursor',null],['cursor','-1'],['limit',null],['limit',501],['to_ms',-1]].map(([k,v]) => ({action:'danmaku',post_id:'post-test',[k]:v})),
     ...[['at_ms',0.5],['body','🙂'.repeat(101)],['body',' '],['mode',[]],['mode',null],['size',null],['color','red']].map(([k,v]) => ({action:'send_danmaku',post_id:'post-test',at_ms:1,body:'hi',[k]:v}))];
   for (const value of invalid) assert.throws(() => validateEngagement(value), {code:'invalid_engagement_input'});
-  assert.equal(validateEngagement({action:'send_danmaku',post_id:'post-test',at_ms:1,body:'🙂'.repeat(100)}).body.length,200);
+  assert.throws(()=>validateEngagement({action:'send_danmaku',post_id:'post-test',at_ms:1,body:'hello'}),{code:'invalid_engagement_input'});
   assert.deepEqual(validateEngagement(like),like);
   assert.deepEqual(validateEngagement({...like,target_type:'comment',liked:false}),{...like,target_type:'comment',liked:false});
 });
 
-test('explicit transport methods and one-page time window never autofetch or auto-write', async () => {
+test('explicit text engagement methods never autofetch or auto-write and retired danmaku is rejected', async () => {
   const calls=[];
   const api = {data:async path => {calls.push({path}); return wallet;}, request:async path => {calls.push({path}); return {data:[],next_cursor:'8',latest_cursor:'9',duration_ms:30000};}};
   const client = new EngagementClient(api, {write:async (path,body,key,method='POST') => {
@@ -37,17 +37,12 @@ test('explicit transport methods and one-page time window never autofetch or aut
     return path==='/api/v1/engagement/likes' ? {...body,like_count:body.liked ? 1 : 0} : method==='DELETE' ? {id:'dm-test',status:'hidden'} : path.endsWith('/tokens') ? supported : {...body,id:'dm-test',post_id:'post-test'};
   }});
   assert.deepEqual(await client.wallet(),wallet);
-  const page=await client.danmaku('post-test',{from_ms:2000,to_ms:4000,cursor:'7',limit:1});
-  assert.deepEqual(page.window,{from_ms:2000,to_ms:4000});
-  assert.equal(page.next_cursor,'8'); assert.equal(page.latest_cursor,'9'); assert.match(page.notice,/不是字幕/);
-  assert.equal(calls.length,2);
+  await assert.rejects(()=>client.danmaku('post-test'),{code:'invalid_engagement_input'});
+  assert.equal(calls.length,1);
   await client.supportPost('post-test',2,'fixed-key-1');
   assert.deepEqual(calls.at(-1),{path:'/api/v1/posts/post-test/tokens',body:{amount:2},key:'fixed-key-1',method:'POST'});
-  const sent=await client.sendDanmaku('post-test',10,' \t'+'🙂'.repeat(100)+' \n','fixed-key-2',{color:'#abcdef'});
-  assert.equal(calls.at(-1).body.color,'#ABCDEF');
-  assert.equal(sent.body,'🙂'.repeat(100)); assert.equal(calls.at(-1).body.body,sent.body);
-  await client.deleteDanmaku('post-test','dm-test','fixed-key-3');
-  assert.deepEqual(calls.at(-1),{path:'/api/v1/posts/post-test/danmaku/dm-test',body:undefined,key:'fixed-key-3',method:'DELETE'});
+  await assert.rejects(()=>client.sendDanmaku('post-test',10,'hello','fixed-key-2'),{code:'invalid_engagement_input'});
+  await assert.rejects(()=>client.deleteDanmaku('post-test','dm-test','fixed-key-3'),{code:'invalid_engagement_input'});
   const liked = await client.setLike('post','post-test',true,'fixed-key-5');
   assert.deepEqual(liked,{target_type:'post',target_id:'post-test',liked:true,like_count:1});
   assert.deepEqual(calls.at(-1),{path:'/api/v1/engagement/likes',body:{target_type:'post',target_id:'post-test',liked:true},key:'fixed-key-5',method:'PUT'});
@@ -69,7 +64,7 @@ test('like responses must match the approved target and boolean state with a val
 
 test('server rejection marker cannot confuse local cancellation with a rejected write', async () => {
   const api=new RuntimeApi({baseUrl:'http://127.0.0.1:4999',fetchImpl:async () => ({ok:false,status:429,json:async () => ({error:{code:'danmaku_rate_limited',retry_after_seconds:15,message:'PRIVATE_UPSTREAM'}})})});
-  await assert.rejects(() => api.data('/api/v1/posts/post-test/danmaku'), error => {
+  await assert.rejects(() => api.data('/api/v1/posts/post-test/tokens'), error => {
     assert.equal(error.code,'danmaku_rate_limited'); assert.equal(error.retry_after_seconds,15);
     assert.equal(definiteEngagementRejection(error),true); assert.equal(publicError(error).retry_after_seconds,15);
     assert.doesNotMatch(JSON.stringify(publicError(error)),/PRIVATE/); return true;
@@ -109,8 +104,10 @@ function fixture(t) {
     if(path==='/api/v1/posts')return send([]);
     if(path==='/api/v1/agent/configuration')return send({actor,persona:{description:'测试伙伴',effective:{}}});
     if(path==='/api/v1/tokens/wallet')return send(wallet);
+    if(path==='/api/v1/stickers/resolve')return send([{type:'sticker',id:remote.stickerId || 'sticker_original',shortcode:':ds_rice:',available:true}]);
     if(path==='/api/v1/posts/post-test/danmaku' && request.method==='GET')return send([],{next_cursor:null,latest_cursor:'0',duration_ms:30000});
-    if(path==='/api/v1/engagement/likes' || path==='/api/v1/posts/post-test/tokens' || path.startsWith('/api/v1/posts/post-test/danmaku')) {
+    if(path==='/api/v1/posts/post-test/participation')return send({post_id:'post-test',reserved:true});
+    if(path==='/api/v1/engagement/likes' || path==='/api/v1/posts/post-test/tokens' || path==='/api/v1/posts/post-test/comments') {
       assert.equal(request.headers['X-AI-Instance-ID'],remote.held);assert.ok(remote.held);assert.equal(request.headers['X-AI-Control-Epoch'],'3');
       const key=request.headers['Idempotency-Key'];remote.writes.push({path,body,key,method:request.method});
       if(remote.rejection)return error(remote.rejection.code,remote.rejection.status);
@@ -120,7 +117,7 @@ function fixture(t) {
         assert.equal(request.method,'PUT');
         remote.likes.set(`${body.target_type}:${body.target_id}`,body.liked);
         result={...body,like_count:body.liked ? 1 : 0};
-      } else result=path.endsWith('/tokens') ? supported : request.method==='DELETE' ? {id:'dm-test',status:'hidden'} : {...body,id:'dm-test',post_id:'post-test'};
+      } else result=path.endsWith('/tokens') ? supported : {...body,id:'comment-test',post_id:'post-test',status:'published'};
       remote.accepted.set(key,{body,result});
       if(remote.onWrite)remote.onWrite();
       if(remote.lost){remote.lost=false;throw new Error('lost mock response');}
@@ -136,16 +133,15 @@ function fixture(t) {
 
 test('paused companion blocks new social writes while keeping read and retraction tools available', async t => {
   const f = fixture(t); f.remote.preferences = { community: { paused: true, allow_token_support: true }, diary: {} };
-  for (const args of [support, like, {action:'send_danmaku',post_id:'post-test',at_ms:1200,body:'暂停时不发送'}]) {
+  for (const args of [support, like, {action:'send_comment',post_id:'post-test',body:'暂停时不发送'}]) {
     await assert.rejects(() => f.runtime.engagement(args), {code:'community_paused'});
   }
   assert.equal(f.remote.writes.length, 0);
   assert.deepEqual((await f.runtime.engagement({action:'token_wallet'})).result, wallet);
   await f.runtime.engagement({...like, liked:false});
-  await f.runtime.engagement({action:'delete_danmaku',post_id:'post-test',danmaku_id:'dm-test'});
-  assert.equal(f.remote.writes.length, 2); assert.equal(f.remote.preferences.community.allow_token_support, true);
+  assert.equal(f.remote.writes.length, 1); assert.equal(f.remote.preferences.community.allow_token_support, true);
   f.remote.preferences.community.paused = false;
-  await f.runtime.engagement(support); assert.equal(f.remote.accepted.size, 3);
+  await f.runtime.engagement(support); assert.equal(f.remote.accepted.size, 2);
 });
 
 test('pause does not prevent reconciliation of an uncertain engagement with the original key', async t => {
@@ -162,7 +158,7 @@ test('pause does not prevent reconciliation of an uncertain engagement with the 
 test('reads do not claim control; single observation never supports, likes or sends danmaku',async t=>{
   const f=fixture(t);f.remote.held='other-controller';
   assert.deepEqual((await f.runtime.engagement({action:'token_wallet'})).result,wallet);
-  await f.runtime.engagement({action:'danmaku',post_id:'post-test'});
+  await assert.rejects(()=>f.runtime.engagement({action:'danmaku',post_id:'post-test'}),{code:'invalid_engagement_input'});
   assert.equal(f.remote.claims,0);assert.equal(f.remote.writes.length,0);
   f.remote.held=null;f.runtime.start({max_model_calls:77});await f.runtime.settled();
   assert.equal(f.remote.writes.length,0);assert.equal(f.remote.modelCalls,0);
@@ -201,13 +197,38 @@ test('first explicit rejection unlocks while cancellation after submission retai
   assert.equal(f.remote.accepted.size,1);
 });
 
-test('danmaku send and hide use same controlled explicit lifecycle',async t=>{
+test('explicit image/sticker comment uses the controlled queue and retries original bytes after a lost response',async t=>{
   const f=fixture(t);
-  const sent=await f.runtime.engagement({action:'send_danmaku',post_id:'post-test',at_ms:1200,body:'好看'});
-  assert.equal(sent.result.id,'dm-test');
-  const removed=await f.runtime.engagement({action:'delete_danmaku',post_id:'post-test',danmaku_id:'dm-test'});
-  assert.equal(removed.result.status,'hidden');assert.equal(f.remote.writes.at(-1).method,'DELETE');
+  const args={action:'send_comment',post_id:'post-test',body:'好看',attachments:[{type:'sticker',id:'sticker_test'}]};f.remote.lost=true;
+  await assert.rejects(()=>f.runtime.engagement(args),{code:'network_error'});
+  const original=JSON.parse(readFileSync(f.runtime.stateFile,'utf8')).pending_engagement;
+  const result=await f.make().engagement({action:'retry_engagement'});
+  assert.equal(result.result.id,'comment-test');assert.deepEqual(f.remote.writes.at(-1).body.attachments,args.attachments);
+  assert.equal(f.remote.accepted.size,1);assert.equal(f.remote.writes.at(-1).key,original.key);
   assert.equal(f.remote.claims,2);assert.equal(f.remote.releases,2);assert.equal(f.remote.modelCalls,0);
+});
+
+test('shortcode comments freeze real IDs before submission and do not resolve again on uncertain retry',async t=>{
+  const f=fixture(t),args={action:'send_comment',post_id:'post-test',body:'干饭！',sticker_codes:[':ds_rice:']};
+  f.remote.lost=true;
+  await assert.rejects(()=>f.runtime.engagement(args),{code:'network_error'});
+  const pending=JSON.parse(readFileSync(f.runtime.stateFile,'utf8')).pending_engagement;
+  assert.deepEqual(pending.args.sticker_codes,[':ds_rice:']);
+  assert.deepEqual(pending.resolved_args.attachments,[{type:'sticker',id:'sticker_original'}]);
+  f.remote.stickerId='sticker_replaced';
+  const result=await f.make().engagement({action:'retry_engagement'});
+  assert.equal(result.result.id,'comment-test');
+  assert.equal(f.remote.calls.filter(call=>call.path==='/api/v1/stickers/resolve').length,1);
+  assert.deepEqual(f.remote.writes.at(-1).body.attachments,[{type:'sticker',id:'sticker_original'}]);
+  assert.equal(f.remote.writes.at(-1).key,pending.key);assert.equal(f.remote.accepted.size,1);assert.equal(f.remote.modelCalls,0);
+});
+
+test('legacy uncertain video actions are retained without replaying or blocking text observation',async t=>{
+  const f=fixture(t),old={args:{action:'send_danmaku',post_id:'post-test',at_ms:0,body:'legacy'},key:'original-video-key',uncertain:true};
+  f.runtime.commit({pending_engagement:old});const restarted=f.make();
+  assert.equal(restarted.state.pending_engagement,null);assert.deepEqual(restarted.state.retired_video_engagement,[old]);
+  restarted.start();await restarted.settled();assert.equal(restarted.publicStatus().error,null);assert.equal(f.remote.writes.length,0);
+  assert.deepEqual(JSON.parse(readFileSync(restarted.stateFile,'utf8')).retired_video_engagement,[old]);
 });
 
 test('like and unlike use controlled PUT; lost response retry preserves the original outcome',async t=>{

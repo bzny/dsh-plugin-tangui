@@ -204,12 +204,12 @@ test('unknown trigger kinds and extra fields stay hidden', async () => {
   assert.doesNotMatch(text(block), /telemetry_probe|secret-hint-99|raw-abc|post-secret-42/);
 });
 
-test('waiting video explains the queue while other messages keep flowing', async () => {
+test('waiting content explains the queue while other messages keep flowing', async () => {
   const state = fixture(); state.managementSession.sessionId = 'session-current';
-  state.runtime.observation = observation({ waiting_video_events: 2, last_check: { at: '2026-10-29T14:37:00+08:00', model_calls: 0, status: 'completed', reason: 'waiting_video' } });
+  state.runtime.observation = observation({ waiting_events: 2, last_check: { at: '2026-10-29T14:37:00+08:00', model_calls: 0, status: 'completed', reason: 'waiting_content' } });
   const ui = page(state); ui.render(); const tree = await ui.settle();
   const block = observationBlock(ui, tree);
-  assert.match(text(block), /有 2 条互动消息在等待视频材料/);
+  assert.match(text(block), /有 2 条互动消息等待继续处理/);
   assert.match(text(block), /其他消息仍可继续处理/);
 });
 

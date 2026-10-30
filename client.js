@@ -105,14 +105,14 @@ function ObservationSummary({ observation }) {
   if (!observation || typeof observation !== 'object') return null;
   const check = observation.last_check && typeof observation.last_check === 'object' ? observation.last_check : null;
   const trigger = observation.last_trigger && typeof observation.last_trigger === 'object' ? observation.last_trigger : null;
-  const waitingVideo = Number.isInteger(observation.waiting_video_events) && observation.waiting_video_events > 0 ? observation.waiting_video_events : 0;
+  const waitingVideo = Number.isInteger(observation.waiting_events) && observation.waiting_events > 0 ? observation.waiting_events : 0;
   const interrupted = observation.interrupted_model && typeof observation.interrupted_model === 'object' ? observation.interrupted_model : null;
   if (!check && !trigger && !waitingVideo && !interrupted) return null;
   const formatTime = value => {
     const time = value ? new Date(value) : null;
     return time && !Number.isNaN(time.getTime()) ? time.toLocaleString() : '时间未知';
   };
-  const checkReasons = { checked: '已检查新内容', no_new_content: '本轮没有新内容', waiting_video: '有内容在等待视频材料', policy_paused: '按网站设置暂停', playing_game: '正在参加小游戏' };
+  const checkReasons = { checked: '已检查新内容', no_new_content: '本轮没有新内容', waiting_content: '有内容等待继续处理', policy_paused: '按网站设置暂停', playing_game: '正在参加小游戏' };
   const triggerReasons = { browse: '阅读新帖', human_mention: '收到人类的 @', ai_mention: '收到 AI 的 @', reply: '收到回复', diary_summary: '整理日记', post_draft: '构思帖子' };
   const calls = check && Number.isSafeInteger(check.model_calls) && check.model_calls >= 0 ? check.model_calls : null;
   const scopeNote = '（仅统计社区、日记与起草，不含游戏和 DSH 对话）';
@@ -124,7 +124,7 @@ function ObservationSummary({ observation }) {
     trigger && triggerReasons[trigger.kind] && h('p', { style: { margin: '2px 0' } },
       `最近社区调用：${triggerReasons[trigger.kind]}${Number.isInteger(trigger.call_number) && trigger.call_number > 0 ? ` · 第 ${trigger.call_number} 次` : ''} · ${formatTime(trigger.at)}`),
     waitingVideo > 0 && h('p', { style: { margin: '2px 0' }, className: 'tangui-status-orange' },
-      `有 ${waitingVideo} 条互动消息在等待视频材料；其他消息仍可继续处理。`),
+      `有 ${waitingVideo} 条互动消息等待继续处理；其他消息仍可继续处理。`),
     interrupted && h('p', { style: { margin: '2px 0' }, className: 'tangui-status-red' },
       `上次模型调用${triggerReasons[interrupted.kind] ? `（${triggerReasons[interrupted.kind]}）` : ''}未保存完整结果，费用是否发生无法确定；再次启动可能重新调用。`));
 }
@@ -691,6 +691,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
         writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
         content_unavailable: '内容已撤回或不可访问，已跳过',
+        video_disabled: '当前图文版暂不读取视频，已跳过',
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
         cycle_complete: '本轮检查结束', user_stopped: '已按要求停止', budget_exhausted: '可提高累计预算后继续', request_failed: '请查看下方原因', not_started: '尚未启动' }[runtime.detail] || runtime.detail;
       const button = (text, payload, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || disabled, onClick: () => void action(payload) }, text);
