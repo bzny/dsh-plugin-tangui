@@ -130,7 +130,7 @@ function ObservationSummary({ observation }) {
 }
 
 // Inbox reminder presentation supplied by KIMI; runtime data wiring by Codex.
-// 只展示数量与请求者名称，不展示私信正文，也不触发模型调用。
+// 只展示数量与公开账号名称，不展示私信正文，也不触发模型调用。
 function inboxCheckedAtText(checkedAt) {
   try {
     const time = checkedAt ? new Date(checkedAt) : null;
@@ -156,7 +156,12 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
   const dmCount = Number.isInteger(inbox.dm_request_count) && inbox.dm_request_count > 0 ? inbox.dm_request_count : 0;
   const unreadDm = Number.isInteger(inbox.unread_dm_count) && inbox.unread_dm_count > 0 ? inbox.unread_dm_count : 0;
   const unread = Number.isInteger(inbox.unread_count) && inbox.unread_count > 0 ? inbox.unread_count : 0;
-  const friendNames = (Array.isArray(inbox.friend_requests) ? inbox.friend_requests : []).map(item => item && item.actor && item.actor.name).filter(name => typeof name === 'string' && name).slice(0, 3);
+  const friendRequests = Array.isArray(inbox.friend_requests) ? inbox.friend_requests : [];
+  const friendNames = friendRequests.map(item => {
+    const members = item?.account?.members;
+    const names = Array.isArray(members) ? members.map(member => member?.name).filter(name => typeof name === 'string' && name) : [];
+    return names.length ? names.join(' + ') : item?.actor?.name;
+  }).filter(name => typeof name === 'string' && name).slice(0, 3);
   const dmNames = (Array.isArray(inbox.dm_requests) ? inbox.dm_requests : []).map(item => item && item.actor && item.actor.name).filter(name => typeof name === 'string' && name).slice(0, 3);
   const hasData = friendCount > 0 || dmCount > 0 || unreadDm > 0 || unread > 0;
   const checkedText = inboxCheckedAtText(inbox.checked_at);
@@ -164,7 +169,9 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
   const messagesHref = communityLink(platformUrl, inbox.messages_url);
   const friendsHref = communityLink(platformUrl, inbox.friends_url);
   const namesText = names => names.join('、');
-  const friendText = friendCount ? `${friendNames.length ? `${namesText(friendNames)} 等 ${friendCount} 人` : `${friendCount} 人`}请求加为好友` : '';
+  const recipientType = friendRequests[0]?.recipient_account?.type;
+  const friendIntent = recipientType === 'pair' ? '想加我们为好友' : ['human', 'ai'].includes(recipientType) ? '想加我为好友' : '发来好友申请';
+  const friendText = friendCount ? friendNames.length ? `${namesText(friendNames)}${friendCount > friendNames.length ? ' 等' : ''} ${friendIntent}` : '有新的好友申请' : '';
   const dmText = dmCount ? `${dmNames.length ? `${namesText(dmNames)} 等 ${dmCount} 人` : `${dmCount} 人`}发来私信请求` : '';
   const summary = [];
   if (friendCount) summary.push(`好友申请 ${friendCount}`);
@@ -178,6 +185,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
       friendsHref ? h('a', { href: friendsHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理好友申请') : null,
       messagesHref ? h('a', { href: messagesHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理私信') : null,
       h('button', { type: 'button', style: { fontSize: '13px', padding: '3px 9px', borderRadius: '7px', cursor: 'pointer', font: 'inherit', border: '1px solid var(--dsw-alias-border-l2, #888)', color: 'inherit', background: 'var(--dsw-alias-bg-layer-2, transparent)' }, onClick: () => { if (onRefresh) void onRefresh(); } }, refreshLabel || '刷新收件提醒')),
+    friendCount > 0 ? h('small', { style: { display: 'block', opacity: 0.7 } }, '好友申请由你在社区确认；私信仍按人类与 AI 身份分开。') : null,
     inbox.error ? h('p', { style: { margin: '2px 0' }, className: 'tangui-status-red' },
       `暂时无法刷新收件提醒${checkedText ? `，显示的是上次结果（${checkedText}）` : '。'}`) : null,
     !inbox.error && checkedText ? h('small', { style: { display: 'block', opacity: 0.7 } }, `上次检查 ${checkedText}`) : null);

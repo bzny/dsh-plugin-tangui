@@ -90,13 +90,18 @@ function loadPlugin(React, fetchMock) {
   return registered;
 }
 
+const recipientAccount = { id: 'human-self', type: 'pair', name: '本方人类 + 小硅',
+  members: [{ id: 'human-self', name: '本方人类', kind: 'human' }, { id: 'ai-x', name: '小硅', kind: 'ai' }] };
 const inboxFixture = (extra = {}) => ({
   actor_id: 'ai-x', checked_at: '2026-10-29T08:00:00Z', error: null,
   unread_count: 4, friend_request_count: 2, dm_request_count: 1, unread_dm_count: 3,
-  friend_requests: [{ id: 'r1', actor: { id: 'h1', name: '阿碳', kind: 'human' } }, { id: 'r2', actor: { id: 'a1', name: '硅硅', kind: 'ai' } }],
+  friend_requests: [{ id: 'r1', actor: { id: 'h1', name: '阿碳', kind: 'human' }, recipient_account: recipientAccount,
+    account: { id: 'account-1', type: 'pair', name: '阿碳 + 硅硅', members: [{ id: 'h1', name: '阿碳', kind: 'human' }, { id: 'a1', name: '硅硅', kind: 'ai' }] } },
+    { id: 'r2', actor: { id: 'a2', name: '小光', kind: 'ai' }, recipient_account: recipientAccount,
+      account: { id: 'account-2', type: 'ai', name: '小光', members: [{ id: 'a2', name: '小光', kind: 'ai' }] } }],
   dm_requests: [{ id: 'd1', actor: { id: 'h2', name: '路人甲', kind: 'human' } }],
   messages_url: 'https://community.example/messages?actor_id=ai-x#private',
-  friends_url: 'https://community.example/?social=friends&actor_id=ai-x',
+  friends_url: 'https://community.example/?social=friends',
   ...extra,
 });
 
@@ -157,18 +162,56 @@ test('management card shows inbox counts, requesters, same-origin links and refr
   assert.match(text, /好友申请 2/);
   assert.match(text, /私信请求 1/);
   assert.match(text, /未读私信 3/);
-  assert.match(text, /阿碳、硅硅 等 2 人请求加为好友/);
+  assert.match(text, /阿碳 \+ 硅硅、小光 想加我们为好友/);
+  assert.match(text, /好友申请由你在社区确认；私信仍按人类与 AI 身份分开/);
+  assert.doesNotMatch(text, /2 人请求加为好友/);
   assert.match(text, /路人甲 等 1 人发来私信请求/);
   assert.doesNotMatch(text, /私信正文绝不展示/);
   assert.match(text, /上次检查/);
   const hrefs = mounted.find(node => node.type === 'a').map(node => node.props.href);
   assert.ok(hrefs.includes('https://community.example/messages?actor_id=ai-x#private'));
-  assert.ok(hrefs.includes('https://community.example/?social=friends&actor_id=ai-x'));
+  assert.ok(hrefs.includes('https://community.example/?social=friends'));
   const refresh = mounted.find(node => node.type === 'button' && /刷新收件提醒/.test(harness.textOf(node))).at(-1);
   assert.ok(refresh);
   refresh.props.onClick();
   await mounted.tick();
   assert.deepEqual(posts.at(-1), { action: 'inbox_refresh' });
+});
+
+test('old-server friend notices still display actual requesters without account metadata', async () => {
+  const harness = createHarness();
+  const inbox = inboxFixture({ friend_requests: [
+    { id: 'r1', actor: { id: 'h1', name: '阿碳', kind: 'human' } },
+    { id: 'r2', actor: { id: 'a1', name: '硅硅', kind: 'ai' } },
+  ] });
+  const registered = loadPlugin(harness.React, async () => ({ ok: true, status: 200, json: async () => registrationState(inbox) }));
+  const mounted = mountCard(harness, registered['tangui-activity'].component, 'sess-1');
+  await mounted.ready();
+  assert.match(mounted.text(), /阿碳、硅硅 发来好友申请/);
+  assert.doesNotMatch(mounted.text(), /阿碳 \+ 硅硅|想加我|申请与我们/);
+});
+
+for (const kind of ['human', 'ai']) test(`single-role friend recipient ${kind} uses singular wording`, async () => {
+  const harness = createHarness();
+  const member = { id: kind === 'ai' ? 'ai-x' : 'human-self', name: '本方角色', kind };
+  const inbox = inboxFixture({ friend_request_count: 1, friend_requests: [{ ...inboxFixture().friend_requests[0],
+    recipient_account: { id: member.id, type: kind, name: member.name, members: [member] } }] });
+  const registered = loadPlugin(harness.React, async () => ({ ok: true, status: 200, json: async () => registrationState(inbox) }));
+  const mounted = mountCard(harness, registered['tangui-activity'].component, 'sess-1');
+  await mounted.ready();
+  assert.match(mounted.text(), /阿碳 \+ 硅硅 想加我为好友/);
+  assert.doesNotMatch(mounted.text(), /想加我们|申请与我们/);
+});
+
+test('friend notices without recipient metadata keep neutral wording even for paired senders', async () => {
+  const harness = createHarness();
+  const inbox = inboxFixture();
+  inbox.friend_requests = inbox.friend_requests.map(({ recipient_account, ...item }) => item);
+  const registered = loadPlugin(harness.React, async () => ({ ok: true, status: 200, json: async () => registrationState(inbox) }));
+  const mounted = mountCard(harness, registered['tangui-activity'].component, 'sess-1');
+  await mounted.ready();
+  assert.match(mounted.text(), /阿碳 \+ 硅硅、小光 发来好友申请/);
+  assert.doesNotMatch(mounted.text(), /想加我|申请与我们/);
 });
 
 test('cross-origin inbox links are never rendered and empty inbox stays silent', async () => {
@@ -218,7 +261,7 @@ test('runtime panel renders the inbox reminder and refreshes through the action 
   assert.match(pass.text, /社区运行/);
   assert.match(pass.text, /已停止/);
   assert.match(pass.text, /收件提醒：/);
-  assert.match(pass.text, /阿碳、硅硅 等 2 人/);
+  assert.match(pass.text, /阿碳 \+ 硅硅、小光 想加我们为好友/);
   const refresh = harness.findAll(current, node => node.type === 'button' && /刷新收件提醒/.test(harness.textOf(node))).at(-1);
   assert.ok(refresh, 'runtime panel has its own refresh button');
   refresh.props.onClick();

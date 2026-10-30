@@ -45,11 +45,57 @@ function fixture(t) {
 test('inbox works while stopped and budget exhausted; throttles without model calls or writes',async t=>{
   const f=fixture(t);f.runtime.commit({model_calls:999});
   const result = await f.runtime.refreshInbox();
-  assert.equal(result.friend_request_count,1);assert.match(result.friends_url,/actor_id=ai_test/);
+  assert.equal(result.friend_request_count,1);assert.equal(result.friends_url,'http://127.0.0.1:4999/?social=friends');
+  assert.equal(result.messages_url,'http://127.0.0.1:4999/messages?actor_id=ai_test');
+  assert.deepEqual(result.friend_requests,f.remote.inbox.friend_requests,'old servers may omit account metadata');
   await f.runtime.refreshInbox();assert.equal(f.remote.calls.length,1);
   f.runtime.task=Promise.resolve();await f.runtime.refreshInbox(true);f.runtime.task=null;
   assert.equal(f.remote.calls.length,2);assert.equal(f.remote.models,0);assert.equal(f.remote.writes.length,0);
   assert.equal(f.runtime.state.model_calls,999);
+});
+
+test('shared friend metadata keeps only public fields and never pulls human private messages',async t=>{
+  const f=fixture(t);
+  const sender={id:'account_sender',type:'pair',name:'胡安 + 露娜',members:[
+    {id:'human_test',name:'胡安',kind:'human',avatar_url:'/avatars/human.png',online:false},
+    {id:'ai_sender',name:'露娜',kind:'ai',avatar_url:null,online:true},
+  ]};
+  const recipient={id:'account_self',type:'pair',name:'管理者 + AI',members:[
+    {id:'human_self',name:'管理者',kind:'human'}, {id:'ai_test',name:'AI',kind:'ai'},
+  ]};
+  f.remote.inbox.friend_requests=[{id:'friend_test',actor:{id:'human_test',name:'胡安',kind:'human',email:'ACTOR_PRIVATE'},
+    account:{...sender,email:'ACCOUNT_PRIVATE',manager:{name:'HIDDEN_MANAGER'},members:sender.members.map(member=>({...member,token:'MEMBER_PRIVATE'}))},
+    recipient_account:{...recipient,dm_requests:['HUMAN_PRIVATE_REQUEST'],unread_dm_count:9},
+    body:'HUMAN_PRIVATE_MESSAGE',recipient_id:'human_self'}];
+  f.remote.inbox.human_dm_requests=[{id:'human_dm',body:'HUMAN_PRIVATE_MESSAGE'}];
+  f.remote.inbox.dm_requests[0].account=sender;
+  f.remote.inbox.dm_requests[0].recipient_account=recipient;
+  f.remote.inbox.dm_requests[0].body='AI_PRIVATE_MESSAGE';
+  const result=await f.runtime.refreshInbox();
+  assert.deepEqual(result.friend_requests,[{id:'friend_test',actor:{id:'human_test',name:'胡安',kind:'human'},account:sender,recipient_account:recipient}]);
+  assert.deepEqual(result.dm_requests,[{id:'dm_test',actor:{id:'human_test',name:'胡安',kind:'human'}}]);
+  assert.equal(result.actor_id,'ai_test');assert.equal(result.dm_request_count,1);assert.equal(result.unread_dm_count,1);
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE|HIDDEN_MANAGER|human_dm_requests|recipient_id|email|token/);
+  assert.deepEqual(f.remote.calls,[{path:'/api/v1/agent/inbox',method:'GET'}]);
+  assert.equal(f.remote.models,0);assert.equal(f.remote.writes.length,0);
+});
+
+test('standalone public accounts do not expose a hidden manager and malformed groups fail explicitly',async t=>{
+  const f=fixture(t);
+  for(const kind of ['human','ai']) {
+    const member={id:`${kind}_sender`,name:kind==='ai'?'独立伙伴':'人类朋友',kind};
+    const account={id:`account_${kind}`,type:kind,name:member.name,members:[member]};
+    const item={id:'friend_test',actor:member,account:{...account,manager:{id:'hidden',name:'HIDDEN_MANAGER'}}};
+    const result=inboxView({...f.remote.inbox,friend_requests:[item]},f.binding,'now');
+    assert.deepEqual(result.friend_requests[0].account,account);
+    assert.doesNotMatch(JSON.stringify(result),/HIDDEN_MANAGER|manager/);
+  }
+  const solo={id:'account_ai',type:'ai',name:'独立伙伴',members:[{id:'ai_sender',name:'独立伙伴',kind:'ai'}]};
+  for(const account of [
+    {...solo,type:'private'}, {...solo,members:[...solo.members,{id:'hidden',name:'HIDDEN_MANAGER',kind:'human'}]},
+    {...solo,members:[{...solo.members[0],online:'yes'}]},
+    {...solo,members:[{...solo.members[0],avatar_url:{email:'PRIVATE'}}]},
+  ]) assert.throws(()=>inboxView({...f.remote.inbox,friend_requests:[{id:'friend_test',actor:solo.members[0],account}]},f.binding,'now'),{code:'invalid_inbox_response'});
 });
 
 test('new identity discards a delayed inbox response and clears stale reminders',async t=>{

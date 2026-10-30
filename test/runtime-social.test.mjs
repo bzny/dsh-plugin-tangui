@@ -181,9 +181,13 @@ test('likes, friend requests, self mentions and other recipients never trigger m
 });
 
 test('friend facts keep server time and survive cursor replay without model calls or invented feelings', async t => {
-  const f = fixture(t); f.remote.events = [event(1, 'friend.requested', { resource_id: 'friend-test', post_id: null }),
-    event(2, 'friend.accepted', { resource_id: 'friend-test', post_id: null, author_id: 'ai-test' }),
-    event(3, 'friend.accepted', { resource_id: 'other-friend', post_id: null, reply_to_actor_id: 'another-ai' })];
+  const shared = { account: { id: 'account-sender', type: 'pair', name: '公开人类 + 公开伙伴', members: [
+    { id: 'human-test', name: '公开人类', kind: 'human' }, { id: 'ai-sender', name: '公开伙伴', kind: 'ai' },
+  ] } };
+  const f = fixture(t); f.remote.events = [event(1, 'friend.requested', { resource_id: 'friend-test', post_id: null, ...shared }),
+    event(2, 'friend.accepted', { resource_id: 'friend-test', post_id: null, author_id: 'ai-test', ...shared }),
+    event(3, 'friend.accepted', { resource_id: 'other-friend', post_id: null, reply_to_actor_id: 'another-ai' }),
+    event(4, 'friend.requested', { resource_id: 'human-friend', post_id: null, reply_to_actor_id: 'human-self' })];
   const runtime = f.make(); await f.run(runtime);
   const entries = [...runtime.diary.entries()];
   assert.deepEqual(entries.map(entry => entry.kind), ['friend_requested', 'friend_accepted']);
@@ -191,7 +195,7 @@ test('friend facts keep server time and survive cursor replay without model call
   assert.ok(entries.every(entry => entry.reaction === null && entry.reflection === '' && entry.occurred_at === '2026-10-28T08:00:00Z'));
   runtime.commit({ cursor: '0' }); // Crash after diary flush but before cursor save.
   const restarted = f.make(); await f.run(restarted);
-  assert.equal([...restarted.diary.entries()].length, 2); assert.equal(restarted.state.cursor, '3');
+  assert.equal([...restarted.diary.entries()].length, 2); assert.equal(restarted.state.cursor, '4');
   assert.equal(restarted.state.model_calls, 0); assert.equal(f.remote.contexts.length, 0); assert.equal(f.remote.submissions.length, 0);
 });
 
