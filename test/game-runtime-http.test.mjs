@@ -188,6 +188,17 @@ async function settle(f, predicate) {
   assert.equal(Boolean(predicate()), true, 'runtime did not reach the expected isolated state');
 }
 
+test('private game memory note is saved locally and never enters the action HTTP body', async t => {
+  const f = await fixture(t, { decide: async () => ({ action_id: 'pass', commentary: '这次先观察。', memory_note: 'PRIVATE_GAME_NOTE' }) });
+  await connect(f); await ready(f); f.request();
+  await settle(f, () => f.remote.actions.size === 1);
+  const record = f.saved().journals['fixture-room'].requests['fixture-turn-1'];
+  assert.equal(record.memory_note, 'PRIVATE_GAME_NOTE'); assert.equal(record.status, 'accepted');
+  assert.deepEqual(record.receipt, { status: 'accepted', request_id: 'fixture-turn-1' });
+  const submits = f.calls.filter(call => call.path.endsWith('/actions'));
+  assert.equal(submits.length, 1); assert.doesNotMatch(JSON.stringify(submits), /PRIVATE_GAME_NOTE|memory_note/);
+});
+
 test('shared community recovery rereads the game and discards a decision past its original deadline', async t => {
   let finish;
   const f = await fixture(t, { decide: () => new Promise(resolve => { finish = resolve; }) });

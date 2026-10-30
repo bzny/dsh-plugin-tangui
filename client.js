@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
     function activitySummary(state) {
       const entry = state.modelLogs?.at(-1);
       const runtime = state.runtime || {};
-      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记', post_draft: '起草帖子' }[entry?.purpose] || '模型调用';
+      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', game_reflection: '游戏计划与回想', diary_summary: '整理日记', post_draft: '起草帖子' }[entry?.purpose] || '模型调用';
       const stage = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '模型调用失败', cancelled: '调用已停止', timed_out: '模型等待超时' }[entry?.phase] || '处理中';
       const stageTone = { waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' }[entry?.phase] || 'blue';
       const outcome = [runtime.last_model_call, state.lastGameModelCall].find(row => row?.call_id === entry?.call_id);
@@ -190,6 +190,247 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
       `暂时无法刷新收件提醒${checkedText ? `，显示的是上次结果（${checkedText}）` : '。'}`) : null,
     !inbox.error && checkedText ? h('small', { style: { display: 'block', opacity: 0.7 } }, `上次检查 ${checkedText}`) : null);
 }
+// Partner thoughts reader supplied by KIMI; local API integration by Codex.
+const PARTNER_THOUGHTS_CSS = `
+.tangui-thoughts{margin:10px 0;min-width:0}
+.tangui-thoughts button,.tangui-thoughts select{min-height:40px;font:inherit}
+.tangui-thoughts button:focus-visible,.tangui-thoughts select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}
+.tangui-thoughts-panel{margin-top:8px;padding:12px;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:10px;background:var(--dsw-alias-bg-layer-1,transparent);min-width:0}
+.tangui-thoughts-head,.tangui-thoughts-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tangui-thoughts-head{justify-content:space-between}
+.tangui-thoughts-date{display:flex;align-items:center;gap:6px;flex:1 1 230px;min-width:0;white-space:nowrap}
+.tangui-thoughts-date select{width:100%;max-width:100%;min-width:0;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent);color:inherit}
+.tangui-thoughts-item{padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2,#aaa);overflow-wrap:anywhere}
+.tangui-thoughts-meta{display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;font-size:13px}
+`;
+function PartnerThoughts({ actorId, actorName, baseUrl }) {
+  const [openFor, setOpenFor] = React.useState(null);
+  const [mode, setMode] = React.useState('desc');
+  const [date, setDate] = React.useState('');
+  const [data, setData] = React.useState(null);
+  const [dates, setDates] = React.useState([]);
+  const [stack, setStack] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const sequence = React.useRef(0);
+  const request = React.useRef(null);
+  const entryRef = React.useRef(null);
+  const panelId = React.useRef('tangui-thoughts-' + Math.random().toString(36).slice(2));
+  let origin = '';
+  try { origin = new URL(baseUrl).origin; } catch (_) {}
+  const identity = JSON.stringify([origin, actorId]);
+  const identityRef = React.useRef(identity);
+  identityRef.current = identity;
+  const open = openFor === identity;
+  const view = data && data.key === identity ? data.value : null;
+  const message = error && error.key === identity ? error.text : '';
+  const text = value => typeof value === 'string' ? value : (typeof value === 'number' ? String(value) : '');
+  React.useEffect(() => {
+    setOpenFor(null);
+    setData(null);
+    setDates([]);
+    setStack([]);
+    setError(null);
+    setMode('desc');
+    setDate('');
+    setLoading(false);
+    return () => {
+      sequence.current += 1;
+      if (request.current) request.current.abort();
+      request.current = null;
+    };
+  }, [identity]);
+  function stop() {
+    sequence.current += 1;
+    if (request.current) request.current.abort();
+    request.current = null;
+    setLoading(false);
+  }
+  function close() {
+    stop();
+    setOpenFor(null);
+    if (entryRef.current) entryRef.current.focus();
+  }
+  function failure(code) {
+    const err = new Error(code);
+    err.thoughtCode = code;
+    return err;
+  }
+  async function load(queryMode, queryDate, nextStack) {
+    if (!origin || !actorId) return;
+    const ticket = ++sequence.current;
+    const requestIdentity = identity;
+    const requestOrigin = origin;
+    const requestActor = actorId;
+    const expectedDate = queryDate || null;
+    if (request.current) request.current.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setLoading(true);
+    setError(null);
+    try {
+      const body = { action: 'thoughts', limit: 20, expected_actor_id: requestActor, expected_base_url: requestOrigin };
+      if (expectedDate) body.date = expectedDate;
+      if (nextStack.length) body.cursor = nextStack[nextStack.length - 1];
+      const response = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-tangui-client': '1' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: controller.signal,
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json().catch(() => null);
+      if (sequence.current !== ticket || identityRef.current !== requestIdentity) return;
+      if (!response.ok) {
+        const code = payload && payload.error && payload.error.code;
+        if (code === 'thoughts_identity_changed') throw failure('identity');
+        if (code === 'thoughts_timezone_unavailable') throw failure('timezone');
+        if (response.status === 404) throw failure('unavailable');
+        throw failure('generic');
+      }
+      const thoughts = payload && payload.thoughts;
+      if (!thoughts || typeof thoughts !== 'object' || Array.isArray(thoughts) || !Array.isArray(thoughts.items)) throw failure('invalid');
+      const returnedIdentity = thoughts.identity;
+      if (!returnedIdentity || typeof returnedIdentity !== 'object') throw failure('invalid');
+      if (returnedIdentity.base_url !== requestOrigin || returnedIdentity.actor_id !== requestActor) throw failure('identity');
+      const expectedOrder = queryMode === 'daily' ? 'asc' : 'desc';
+      if (thoughts.order !== expectedOrder || thoughts.date !== expectedDate) throw failure('invalid');
+      if (typeof thoughts.display_timezone !== 'string' || typeof thoughts.timezone_known !== 'boolean' ||
+          !Array.isArray(thoughts.dates) || typeof thoughts.has_more !== 'boolean' ||
+          !(thoughts.next_cursor === null || typeof thoughts.next_cursor === 'string')) throw failure('invalid');
+      setData({ key: requestIdentity, value: thoughts });
+      setDates(thoughts.dates.filter(item => item && typeof item.date === 'string').map(item => ({
+        date: item.date,
+        count: Number.isInteger(item.count) && item.count >= 0 ? item.count : null
+      })));
+      setStack(nextStack);
+    } catch (err) {
+      if (sequence.current !== ticket || identityRef.current !== requestIdentity) return;
+      if (err && err.name === 'AbortError') return;
+      const code = err && err.thoughtCode;
+      if (code === 'identity') {
+        setData(null);
+        setDates([]);
+        setStack([]);
+        setMode('desc');
+        setDate('');
+        setOpenFor(null);
+        setError({ key: requestIdentity, text: '伙伴身份已变化，请重新打开。' });
+      } else {
+        const messages = {
+          timezone: '尚不能按伙伴日期筛选：伙伴日记时区尚未同步。请切回“最新在前”读取。',
+          unavailable: '当前 DSH 尚未加载想法阅读功能',
+          invalid: '返回内容不完整，请重试。',
+          generic: '想法暂时无法读取，请检查连接后重试。'
+        };
+        setError({ key: requestIdentity, text: messages[code] || messages.generic });
+      }
+    } finally {
+      if (sequence.current === ticket && identityRef.current === requestIdentity) setLoading(false);
+    }
+  }
+  function runQuery(nextMode, nextDate) {
+    setMode(nextMode);
+    setDate(nextDate);
+    setData(null);
+    setError(null);
+    setStack([]);
+    if (nextMode === 'daily' && !nextDate) stop();
+    else void load(nextMode, nextDate, []);
+  }
+  function toggle() {
+    if (open) { close(); return; }
+    if (!origin || !actorId) return;
+    setOpenFor(identity);
+    setData(null);
+    setError(null);
+    setStack([]);
+    if (mode === 'daily' && !date) stop();
+    else void load(mode, date, []);
+  }
+  function refresh() {
+    setData(null);
+    setError(null);
+    setStack([]);
+    if (mode === 'daily' && !date) stop();
+    else void load(mode, date, []);
+  }
+  const activeButton = active => ({
+    ...buttonStyle,
+    marginRight: 0,
+    marginBottom: 0,
+    background: active ? 'var(--dsw-alias-bg-layer-2,#dbeafe)' : 'transparent'
+  });
+  return h('div', { className: 'tangui-thoughts' },
+    h('style', null, PARTNER_THOUGHTS_CSS),
+    h('button', {
+      ref: entryRef,
+      type: 'button',
+      disabled: !origin || !actorId,
+      'aria-expanded': open,
+      'aria-controls': panelId.current,
+      'aria-busy': loading,
+      onClick: toggle,
+      style: { ...buttonStyle, minHeight: '42px', color: '#fff', background: '#2563eb', border: '1px solid #2563eb', fontWeight: 600 }
+    }, h('span', { 'aria-hidden': 'true' }, '💭 '), open ? '收起伙伴想法' : '查看伙伴想法'),
+    message && !open && h('p', { role: 'alert', style: { color: '#d54949', margin: '6px 0' } }, message),
+    open && h('section', {
+      id: panelId.current,
+      className: 'tangui-thoughts-panel',
+      'aria-label': `${actorName || '伙伴'} 的想法`,
+      'aria-busy': loading,
+      onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }
+    },
+      h('div', { className: 'tangui-thoughts-head' },
+        h('strong', null, `${actorName || '伙伴'} 的想法`),
+        h('button', { type: 'button', style: activeButton(false), onClick: close }, '关闭')),
+      h('p', { style: { margin: '5px 0 8px', fontSize: '13px', opacity: .78 } }, '伙伴主动写下的读帖感想、游戏短记与回想，仅存本机。'),
+      h('div', { className: 'tangui-thoughts-controls' },
+        h('button', { type: 'button', 'aria-pressed': mode === 'desc', disabled: loading, style: activeButton(mode === 'desc'), onClick: () => { if (mode !== 'desc') runQuery('desc', ''); } }, '最新在前'),
+        h('button', { type: 'button', 'aria-pressed': mode === 'daily', disabled: loading || !view || view.timezone_known !== true, style: activeButton(mode === 'daily'), onClick: () => { if (mode !== 'daily') runQuery('daily', ''); } }, '按日回看'),
+        mode === 'daily' && h('label', { className: 'tangui-thoughts-date' }, '伙伴日期',
+          h('select', { value: date, disabled: loading || !dates.length, onChange: event => runQuery('daily', event.target.value) },
+            h('option', { value: '' }, dates.length ? '选择日期' : '暂无可用日期'),
+            dates.map(item => h('option', { key: item.date, value: item.date }, item.count === null ? item.date : `${item.date}（${item.count}）`))))),
+      h('p', { style: { margin: '6px 0', fontSize: '13px', opacity: .78 } },
+        mode === 'desc' ? '跨日期，最新在前' : '按伙伴日期，从早到晚',
+        view ? ` · ${view.display_timezone}` : '',
+        view && view.timezone_known === false ? '（日记时区尚未同步，暂不能按日筛选）' : ''),
+      message && h('p', { role: 'alert', style: { color: '#d54949', margin: '7px 0' } }, message),
+      loading && h('p', { role: 'status', style: { margin: '7px 0' } }, '正在读取想法…'),
+      !loading && !view && !message && mode === 'daily' && !date && h('p', null, '请选择一个伙伴日期。'),
+      h('div', { style: { maxHeight: 'min(55vh,480px)', overflowY: 'auto', paddingRight: '4px' } },
+        view && !view.items.length && !loading && h('p', null, '还没有主动留下的想法', mode === 'daily' && date ? ` · ${date}` : ''),
+        view && view.items.map((item, index) => {
+          const localDate = text(item && item.local_date);
+          const localTime = text(item && item.local_time);
+          const when = [localDate, localTime].filter(Boolean).join(' ') || '时间未记录';
+          const resource = item && item.resource && typeof item.resource === 'object' ? item.resource : {};
+          const title = text(resource.title);
+          const gameId = text(resource.game_id);
+          const postId = text(resource.post_id);
+          const roomId = text(resource.room_id);
+          const gameName = ({mahjong: '日麻', richman: '大富翁'})[gameId] || (gameId ? '小游戏' : '');
+          const source = title || gameName || (postId ? '社区帖子' : roomId ? '游戏对局' : '');
+          const sourceDetails = [postId && `帖子 ${postId}`, roomId && `房间 ${roomId}`].filter(Boolean).join(' · ');
+          const reflection = text(item && item.reflection);
+          return h('article', { key: text(item && item.id) || index, className: 'tangui-thoughts-item' },
+            h('div', { className: 'tangui-thoughts-meta' },
+              h('strong', null, text(item && item.kind_label) || '想法'),
+              h('time', {title: `${when} · ${view.display_timezone}`}, when)),
+            source && h('div', { title: sourceDetails || undefined, style: { fontSize: '13px', opacity: .78, marginTop: '4px' } }, '来源：', source),
+            reflection && h('p', { style: { fontSize: '15px', lineHeight: 1.7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: '6px 0 0' } }, reflection));
+        })),
+      h('div', { className: 'tangui-thoughts-controls', style: { marginTop: '8px' } },
+        h('button', { type: 'button', style: activeButton(false), disabled: loading || !stack.length, onClick: () => void load(mode, date, stack.slice(0, -1)) }, '上一页'),
+        h('button', { type: 'button', style: activeButton(false), disabled: loading || !view || !view.has_more || !view.next_cursor, onClick: () => { if (view && view.next_cursor) void load(mode, date, stack.concat([view.next_cursor])); } }, '下一页'),
+        h('button', { type: 'button', style: activeButton(false), disabled: loading || (mode === 'daily' && !date), onClick: refresh }, message ? '重试' : '刷新'),
+        view && h('small', {style: {opacity: .75}},
+          Number.isInteger(view.total) && view.total >= 0 ? `共 ${view.total} 条 · ` : '', `本页 ${view.items.length} 条`))));
+}
+
     function ManagementCard({ sessionId }) {
       const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
@@ -262,6 +503,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
           here ? h('span', null, '本会话接收动态') : !selected ? h('button', { type: 'button', style: smallButton, disabled: busy || !state?.managementSession,
             onClick: () => void bind() }, '在此查看碳硅动态') : h('button', { type: 'button', style: smallButton, onClick: () => void open() }, '打开管理会话'),
           selected && !here && h('details', null, h('summary', { style: { cursor: 'pointer' } }, '更换'), h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => void bind() }, '改到这个会话'))),
+        state?.binding && h(PartnerThoughts, { key: JSON.stringify([state.platformUrl, state.binding.actorId]), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
         !state && !error && h('p', { style: { margin: '5px 0' } }, '正在读取动态…'),
         state && !state.managementSession && h('p', null, '请在任务结束后重启 DSH，以加载会话动态功能。'),
         state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
@@ -639,7 +881,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
 
     function ModelCallsPanel({ state }) {
       const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
-      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', diary_summary: '整理日记', post_draft: '起草帖子' };
+      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', game_reflection: '游戏计划与回想', diary_summary: '整理日记', post_draft: '起草帖子' };
       const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
       const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
       const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
@@ -696,7 +938,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
       const reconnect = reconnectSummary(runtime);
       const label = runtime.stopping ? '正在停止' : reconnect?.label || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
       const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
-        writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
+        writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', planning_game: '正在考虑本次游戏活动', reflecting_game: '正在写本场私人回想', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
         content_unavailable: '内容已撤回或不可访问，已跳过',
         video_disabled: '当前图文版暂不读取视频，已跳过',
@@ -715,6 +957,19 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
         connection.binding && h('p', null, '同一账号连接用于人设、社区、小游戏和日记。',
           h('a', { href: `${state.platformUrl}/manage#companion-preferences`, target: '_blank', rel: 'noopener noreferrer' }, '前往网站设置账号行为与每日写日记')),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
+        state.binding && h(PartnerThoughts, { key: JSON.stringify([state.platformUrl, state.binding.actorId]), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
+        runtime.companion_life && h('details', null, h('summary', null, '伙伴的本地状态与游戏回想'),
+          h('p', null, `心情 ${runtime.companion_life.values.mood.toFixed(1)} · 兴致 ${runtime.companion_life.values.interest.toFixed(1)} · 压力 ${runtime.companion_life.values.pressure.toFixed(1)}`),
+          h('p', null, runtime.companion_life.notice),
+          runtime.companion_life.note && h('p', null, runtime.companion_life.note),
+          runtime.companion_life.goal && h('p', null, '当前小目标：', runtime.companion_life.goal),
+          runtime.companion_life.autoplay && h('p', null, `本次自主活动已开局 ${runtime.companion_life.autoplay.started_games} 场；盘数上限 ${runtime.companion_life.autoplay.max_games ?? '不限'}；游戏与回想累计调用 ${runtime.companion_life.series_calls}/${runtime.companion_life.max_model_calls}。`),
+          runtime.companion_life.local_paused && h('p', null, '本机已停止自主游戏，社区观察可以继续。再次明确启动游戏前不会重新排队。', runtime.companion_life.local_stop_error ? `候场取消尚未确认（${runtime.companion_life.local_stop_error}），本机仍保持停止。` : ''),
+          runtime.companion_life.last_reflection && h('p', null, runtime.companion_life.last_reflection.status === 'failed'
+            ? `回想未完成（${runtime.companion_life.last_reflection.error || '未知原因'}），没有把失败记成坏心情，也未自动重试。`
+            : runtime.companion_life.last_reflection.reflection || '尚未留下赛后回想。'),
+          runtime.companion_life.last_reflection?.next_activity && h('p', null, '下一活动意愿：', ({ continue: '继续游戏', switch_game: '换一种已选游戏', community: '回社区', rest: '休息' })[runtime.companion_life.last_reflection.next_activity], '。实际开局以服务器记录为准。'),
+          h('p', null, '这里的私人回想、状态和同桌印象仅保存在本机；不会写入长期记忆插件。公开草稿仍由网页审核，待审不阻断下一场。')),
         h(InboxReminder, { inbox: runtime.inbox, platformUrl: state.platformUrl, onRefresh: () => action({ action: 'inbox_refresh' }), refreshLabel: '刷新收件提醒' }),
         h(ObservationSummary, { observation: runtime.observation }),
         runtime.last_model_diagnostic && h('details', null, h('summary', null, '最近一次模型调用详情'),
