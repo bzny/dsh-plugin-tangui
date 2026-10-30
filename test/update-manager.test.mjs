@@ -410,3 +410,69 @@ test('installation already started before quiet hours completes its transaction'
   assert.equal((await m.check()).state, 'updated');
   assert.deepEqual(host.calls, ['lock', 'snapshot', 'install', 'activate', 'version', 'release']);
 });
+
+test('activation failure retains its stage after successful recovery, later checks and reload', async () => {
+  let now = 100, activations = 0;
+  const host = hostFixture({ async activate() {
+    now += 20;
+    if (++activations === 1) throw Object.assign(Error('secret path and token'), { code: 'ERR_MODULE_NOT_FOUND' });
+  } });
+  const m = manager({ ...fixture(), host: host.host, now: () => now });
+  const result = await m.check();
+  assert.equal(result.state, 'rolled_back');
+  assert.deepEqual(result.lastAttempt.failure, { stage: 'activate', code: 'unknown', systemCode: 'ERR_MODULE_NOT_FOUND' });
+  assert.equal(result.lastAttempt.outcome, 'rolled_back');
+  assert.equal(result.lastAttempt.startedAt, 100); assert.equal(result.lastAttempt.finishedAt, 140);
+  assert.deepEqual(result.lastAttempt.steps.map(value => value.stage),
+    ['snapshot', 'install', 'activate', 'restore', 'restore_activate', 'restore_verify']);
+  await m.check({ install: false, manual: true });
+  assert.deepEqual(m.status().lastAttempt, result.lastAttempt);
+  const reloaded = manager({ initialState: m.status() });
+  assert.deepEqual(reloaded.status().lastAttempt, result.lastAttempt);
+  assert.doesNotMatch(JSON.stringify(result), /secret|token/);
+});
+
+test('failed recovery keeps both the original failure and recovery stage without raw error data', async () => {
+  const host = hostFixture({
+    async install() { throw Object.assign(Error('private installer output'), { updateDiagnosticCode: 'installer_exit', exitCode: 7 }); },
+    async restore() { throw Object.assign(Error('private backup path'), { code: 'EACCES' }); },
+  });
+  const result = await manager({ ...fixture(), host: host.host }).check();
+  assert.equal(result.state, 'error'); assert.equal(result.error, 'rollback_failed');
+  assert.deepEqual(result.lastAttempt.failure, { stage: 'install', code: 'installer_exit', exitCode: 7 });
+  assert.deepEqual(result.lastAttempt.recoveryFailure, { stage: 'restore', code: 'unknown', systemCode: 'EACCES' });
+  assert.equal(result.lastAttempt.outcome, 'recovery_required');
+  assert.doesNotMatch(JSON.stringify(result), /private/);
+});
+
+test('backup and live-version failures are distinguishable and do not add retry calls', async () => {
+  const backup = hostFixture({ async snapshot() { throw Object.assign(Error('private disk path'), { code: 'ENOSPC' }); } });
+  const result = await manager({ ...fixture(), host: backup.host }).check();
+  assert.equal(result.error, 'backup_failed'); assert.equal(result.lastAttempt.outcome, 'error');
+  assert.deepEqual(result.lastAttempt.failure, { stage: 'snapshot', code: 'unknown', systemCode: 'ENOSPC' });
+  assert.deepEqual(backup.calls, ['lock', 'release']);
+  const mismatch = hostFixture({ getActiveVersion() { return '0.4.0'; } });
+  const m = manager({ ...fixture(), host: mismatch.host });
+  const failed = await m.check();
+  assert.deepEqual(failed.lastAttempt.failure, { stage: 'verify', code: 'activation_version_mismatch' });
+  const before = mismatch.calls.length; await m.tick(); assert.equal(mismatch.calls.length, before);
+});
+
+test('restart confirmation updates the attempt outcome; diagnostic persistence failures do not change the update', async () => {
+  const host = hostFixture({ async install() { return { restartRequired: true }; } });
+  const result = await manager({ ...fixture(), host: host.host, onChange() { throw Error('unwritable log'); } }).check();
+  assert.equal(result.state, 'restarting_needed'); assert.equal(result.lastAttempt.outcome, 'restart_required');
+  const restarted = new UpdateManager({ currentVersion: '0.4.1', currentManifest: newManifest(), initialState: result, now: () => 200 });
+  assert.equal(restarted.status().lastAttempt.outcome, 'updated');
+  assert.equal(restarted.status().lastAttempt.finishedAt, 200);
+  assert.equal(restarted.status().lastAttempt.failure, null);
+});
+
+test('successful update keeps a bounded attempt with no failure', async () => {
+  const host = hostFixture(), m = manager({ ...fixture(), host: host.host });
+  const result = await m.check();
+  assert.deepEqual(result.lastAttempt, { from: '0.4.0', to: '0.4.1', startedAt: 100, finishedAt: 100,
+    stage: 'verify', outcome: 'updated', failure: null, recoveryFailure: null,
+    steps: ['snapshot', 'install', 'activate', 'verify'].map(stage => ({ stage, at: 100 })) });
+  assert.deepEqual(host.calls, ['lock', 'snapshot', 'install', 'activate', 'version', 'release']);
+});
