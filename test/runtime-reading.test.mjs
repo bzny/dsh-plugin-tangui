@@ -12,7 +12,7 @@ function fixture(t, count = 4) {
   const actor = {id:'reader',kind:'ai',name:'阅读伙伴'}, binding = {baseUrl:'http://127.0.0.1:4999',actorId:actor.id,token:'FAKE_ONLY',scopes:['posts:read','comments:write','events:read']};
   const persona = {description:'喜欢游戏，但现在全量阅读',effective:Object.fromEntries(fields.map(k => [k,k === 'interests' ? '游戏' : '']))};
   const remote = {posts:Array.from({length:count},(_,i) => ({id:`post-${i+1}`,seq:i+1,title:`帖子${i+1}`,body:'与兴趣无关的内容',author:{id:'human',kind:'human'}})),
-    calls:[],contexts:[],events:[],writes:[],accepted:new Map(),reserved:new Set(),full:new Set(),mediaPending:new Set(),videoPosts:new Set(),participate:false,badCursor:false};
+    actor,calls:[],contexts:[],events:[],writes:[],accepted:new Map(),reserved:new Set(),full:new Set(),mediaPending:new Set(),videoPosts:new Set(),participate:false,badCursor:false};
   const send = (data, extra = {}) => ({ok:true,status:200,json:async()=>({data,...extra})});
   const error = (code,status=409) => ({ok:false,status,json:async()=>({error:{code}})});
   const fetchImpl = async (url,request) => {
@@ -59,6 +59,20 @@ function fixture(t, count = 4) {
   return {remote,make,run};
 }
 const mention = (id,kind='human') => ({id:String(id),type:'post.mentioned',author_id:kind==='human'?'human':'other-ai',author_kind:kind,reply_to_actor_id:'reader',post_id:'post-1',resource_id:'post-1'});
+
+test('a nickname change during the same watch reaches the next model without reconnecting or reimporting persona', async t => {
+  const f = fixture(t, 2), runtime = f.make();
+  f.remote.afterModel = () => { if (f.remote.contexts.length === 1) f.remote.actor.name = '改名后的阅读伙伴'; };
+  runtime.start({ mode: 'watch', interval_seconds: 3 });
+  for (let i = 0; i < 1000 && f.remote.contexts.length < 2; i++) await new Promise(done => setTimeout(done, 5));
+  runtime.stop(); await runtime.settled();
+  assert.deepEqual(f.remote.contexts.map(value => value.self.name), ['阅读伙伴', '改名后的阅读伙伴']);
+  assert.deepEqual(f.remote.contexts[0].persona, f.remote.contexts[1].persona);
+  assert.equal(f.remote.calls.filter(call => call.path === '/api/v1/me').length, 1);
+  assert.equal(f.remote.calls.filter(call => call.path === '/api/v1/agent/control/acquire').length, 1);
+  assert.equal(f.remote.calls.filter(call => call.path === '/api/v1/agent/control/release').length, 1);
+  assert.equal(f.remote.calls.some(call => call.path.includes('/persona/')), false);
+});
 
 test('reads all paginated new posts across restarts without interests or saved keywords',async t=>{
   const f=fixture(t,5); f.remote.posts[1].author={id:'reader',kind:'ai'};
