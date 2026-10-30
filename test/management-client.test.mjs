@@ -5,10 +5,12 @@ import vm from 'node:vm';
 
 // Exercise the actual chat-slot component, including its network and navigation
 // boundaries. No real session, model, community or credential is used.
-function page(initial, sessionId = 'session-current', visible = true, slot = 'conversation.input.dock') {
+function page(initial, sessionId = 'session-current', visible = true, slot = 'conversation.input.dock', savedDisplay = null) {
   let factory, current, state = initial, failed = false, serial = 0;
   const components = new Map(), timers = new Map(), requests = [], opened = [];
   const storage = new Map([['tangui-management-card-visible', visible ? 'on' : 'off']]), storageListeners = new Set();
+  if (savedDisplay !== null) storage.set('tangui.session-dynamics.expanded.v1', savedDisplay);
+  const localStorage = { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) };
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
     useState(initial) { const owner = current, i = owner.index++; owner.hooks[i] ||= { value: typeof initial === 'function' ? initial() : initial };
@@ -18,11 +20,11 @@ function page(initial, sessionId = 'session-current', visible = true, slot = 'co
       if (!old || deps.some((v, n) => v !== old.deps[n])) owner.effects.push(() => { old?.cleanup?.(); owner.hooks[i] = { deps, cleanup: effect() }; }); },
   };
   vm.runInNewContext(readFileSync('client.js', 'utf8'), {
-    URL, window: { __ModuleLoader__: { load(v) { factory = v.factory; } },
+    URL, window: { localStorage, __ModuleLoader__: { load(v) { factory = v.factory; } },
       addEventListener(name, callback) { if (name === 'storage') storageListeners.add(callback); },
       removeEventListener(name, callback) { if (name === 'storage') storageListeners.delete(callback); } }, AbortController,
     crypto: { randomUUID: () => 'test-observation-uuid' },
-    localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
+    localStorage,
     setTimeout(fn, ms) { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { timers.delete(id); },
     setInterval(fn, ms) { return setTimeout(fn, ms); }, clearInterval(id) { clearTimeout(id); },
     fetch: async (url, options = {}) => {
@@ -43,7 +45,7 @@ function page(initial, sessionId = 'session-current', visible = true, slot = 'co
   const owner = { hooks: [], index: 0, effects: [] };
   const render = () => { current = owner; owner.index = 0; owner.effects = []; const tree = slot === 'settings.section' ? Component({}) : Component({ sessionId }); owner.effects.forEach(f => f()); return tree; };
   const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); return render(); };
-  return { render, settle, requests, opened, setState(value) { state = value; }, fail(value) { failed = value; },
+  return { render, settle, requests, opened, storage, setState(value) { state = value; }, fail(value) { failed = value; },
     mount(node) { const sub = { hooks: [], index: 0, effects: [] }; current = sub; const tree = node.type(node.props); sub.effects.forEach(f => f()); return tree; },
     visibility(value) { storage.set('tangui-management-card-visible', value ? 'on' : 'off'); for (const listener of storageListeners) listener({ key: 'tangui-management-card-visible' }); },
     async poll() { const next = [...timers].find(([, value]) => value.ms === 5000); assert.ok(next); timers.delete(next[0]); await next[1].fn(); return settle(); },
@@ -223,7 +225,7 @@ test('interrupted model call is flagged with no approval or auto action', async 
   assert.match(text(block), /再次启动可能重新调用/);
   assert.doesNotMatch(text(block), /post-hidden-9/);
   assert.equal(find(block, n => n.type === 'button'), null);
-  assert.equal(find(tree, n => n.type === 'button'), null);
+  assert.equal(find(tree, n => n.type === 'button' && text(n) !== '收起动态'), null);
 });
 
 test('observation survives the loop detail resetting to waiting and polling stays read-only', async () => {
@@ -261,4 +263,43 @@ test('RuntimePanel reuses the same read-only observation summary', async () => {
   assert.doesNotMatch(text(block), /post-z/);
   assert.ok(ui.requests.every(r => !r.options.method));
   ui.dispose();
+});
+
+test('complete collapse remembers display choice while read-only polling continues', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current';
+  const ui = page(state); ui.render(); let tree = await ui.settle();
+  button(tree, '收起动态').props.onClick(); tree = await ui.settle();
+  assert.ok(button(tree, '展开动态'));
+  assert.equal(button(tree, '展开动态').props['aria-expanded'], false);
+  assert.equal(find(tree, n => n.type === 'details'), null);
+  assert.equal(find(tree, n => typeof n.type === 'function' && n.type.name === 'PartnerThoughts'), null);
+  assert.equal(ui.storage.get('tangui.session-dynamics.expanded.v1'), '0');
+  const requests = ui.requests.length; await ui.poll(); assert.equal(ui.requests.length, requests + 1);
+  assert.ok(ui.requests.every(r => !r.options.method));
+  button(tree, '展开动态').props.onClick(); tree = await ui.settle();
+  assert.ok(button(tree, '收起动态')); assert.match(text(tree), /累计模型调用/);
+  assert.equal(ui.storage.get('tangui.session-dynamics.expanded.v1'), '1');
+  const restored = page(state, 'session-current', true, 'conversation.input.dock', '0');
+  restored.render(); assert.ok(button(await restored.settle(), '展开动态'));
+  restored.dispose(); ui.dispose();
+});
+
+test('thoughts focus hides other detail and keeps the same reader across polls, then restores it', async () => {
+  const state = fixture(); state.platformUrl='https://community.example'; state.binding.actorId='ai-a';
+  state.managementSession.sessionId='session-current';
+  const ui=page(state); ui.render(); let tree=await ui.settle();
+  const reader = find(tree,n=>typeof n.type==='function' && n.type.name==='PartnerThoughts');
+  assert.ok(reader); reader.props.onOpenChange(true); tree=await ui.settle();
+  assert.equal(find(tree,n=>typeof n.type==='function' && n.type.name==='ObservationSummary'), null);
+  assert.match(tree.props.className,/tangui-session-reading/);
+  tree=await ui.poll();
+  const sameReader=find(tree,n=>typeof n.type==='function' && n.type.name==='PartnerThoughts');
+  assert.equal(sameReader.type,reader.type); assert.equal(sameReader.props.key,reader.props.key);
+  assert.match(tree.props.className,/tangui-session-reading/);
+  sameReader.props.onOpenChange(false); tree=await ui.settle();
+  assert.ok(find(tree,n=>typeof n.type==='function' && n.type.name==='ObservationSummary'));
+  sameReader.props.onOpenChange(true); await ui.settle();
+  ui.setState({...state,binding:{actorId:'ai-b',actorName:'伙伴乙'}}); tree=await ui.poll();
+  assert.doesNotMatch(tree.props.className,/tangui-session-reading/);
+  assert.ok(ui.requests.every(r=>!r.options.method)); ui.dispose();
 });

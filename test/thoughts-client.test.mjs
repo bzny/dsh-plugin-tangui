@@ -138,3 +138,24 @@ test('an explicitly empty page has an honest empty state', async () => {
   const t = harness(call => response(result(call.body, {items: [], total: 0, next_cursor: null, has_more: false, dates: []}))); await t.flush(); await t.press('查看伙伴想法');
   assert.match(t.text(), /还没有主动留下的想法/); assert.match(t.text(), /共 0 条/); assert.equal(t.button('下一页').props.disabled, true);
 });
+
+test('open reader keeps the toggle after the panel and Escape closes from the bottom control', async () => {
+  const opened=[]; const t=harness(undefined,{...propsFor(),onOpenChange:value=>opened.push(value)});
+  await t.flush(); await t.press('查看伙伴想法');
+  const root=t.render(); const panelIndex=root.children.findIndex(node=>node?.type==='section');
+  const toggleIndex=root.children.findIndex(node=>node?.type==='button' && textOf(node).includes('收起伙伴想法'));
+  assert.ok(panelIndex>=0 && toggleIndex>panelIndex);
+  assert.equal(opened.at(-1),true);
+  let stopped=false; root.props.onKeyDown({key:'Escape',stopPropagation(){stopped=true}}); await t.flush();
+  assert.equal(stopped,true); assert.equal(opened.at(-1),false); assert.equal(t.focusCount(),1);
+  assert.ok(t.button('查看伙伴想法')); assert.equal(t.calls.length,1);
+});
+
+test('complete collapse cancels a pending thought read without leaking late data or reopening', async () => {
+  let finish; const t=harness(call=>new Promise(resolve=>{finish=()=>resolve(response(result(call.body,{items:[row('late','已收起后不能显示')]})))}));
+  await t.flush(); await t.press('查看伙伴想法');
+  t.setProps({...propsFor(),collapsed:true}); await t.flush();
+  assert.equal(t.calls[0].signal.aborted,true); finish(); await t.flush();
+  t.setProps({...propsFor(),collapsed:false}); await t.flush();
+  assert.doesNotMatch(t.text(),/已收起后不能显示/); assert.ok(t.button('查看伙伴想法')); assert.equal(t.calls.length,1);
+});

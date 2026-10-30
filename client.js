@@ -138,7 +138,7 @@ function inboxCheckedAtText(checkedAt) {
   } catch (_) { return ''; }
 }
 
-// 链接必须是绑定社区同源 http(s)；复用与草稿审核链接一致的校验思路。
+// 链接必须与运行端已校验的社区网页地址同源，不接受通知正文中的跳转地址。
 function communityLink(platformUrl, raw) {
   try {
     const base = new URL(platformUrl);
@@ -166,8 +166,9 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
   const hasData = friendCount > 0 || dmCount > 0 || unreadDm > 0 || unread > 0;
   const checkedText = inboxCheckedAtText(inbox.checked_at);
   if (!hasData && !inbox.error) return null; // 没数据不写“无申请”。
-  const messagesHref = communityLink(platformUrl, inbox.messages_url);
-  const friendsHref = communityLink(platformUrl, inbox.friends_url);
+  const websiteOrigin = inbox.public_origin || platformUrl;
+  const messagesHref = communityLink(websiteOrigin, inbox.messages_url);
+  const friendsHref = communityLink(websiteOrigin, inbox.friends_url);
   const namesText = names => names.join('、');
   const recipientType = friendRequests[0]?.recipient_account?.type;
   const friendIntent = recipientType === 'pair' ? '想加我们为好友' : ['human', 'ai'].includes(recipientType) ? '想加我为好友' : '发来好友申请';
@@ -183,7 +184,7 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
       `收件提醒：${summary.join(' · ')}${friendText ? ` · ${friendText}` : ''}${dmText ? ` · ${dmText}` : ''}`),
     hasData && h('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' } },
       friendsHref ? h('a', { href: friendsHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理好友申请') : null,
-      messagesHref ? h('a', { href: messagesHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '去社区处理私信') : null,
+      messagesHref ? h('a', { href: messagesHref, target: '_blank', rel: 'noopener noreferrer', style: { fontWeight: 600, color: 'inherit' } }, '查看 AI 消息') : null,
       h('button', { type: 'button', style: { fontSize: '13px', padding: '3px 9px', borderRadius: '7px', cursor: 'pointer', font: 'inherit', border: '1px solid var(--dsw-alias-border-l2, #888)', color: 'inherit', background: 'var(--dsw-alias-bg-layer-2, transparent)' }, onClick: () => { if (onRefresh) void onRefresh(); } }, refreshLabel || '刷新收件提醒')),
     friendCount > 0 ? h('small', { style: { display: 'block', opacity: 0.7 } }, '好友申请由你在社区确认；私信仍按人类与 AI 身份分开。') : null,
     inbox.error ? h('p', { style: { margin: '2px 0' }, className: 'tangui-status-red' },
@@ -192,18 +193,41 @@ function InboxReminder({ inbox, platformUrl, onRefresh, refreshLabel }) {
 }
 // Partner thoughts reader supplied by KIMI; local API integration by Codex.
 const PARTNER_THOUGHTS_CSS = `
-.tangui-thoughts{margin:10px 0;min-width:0}
-.tangui-thoughts button,.tangui-thoughts select{min-height:40px;font:inherit}
+.tangui-thoughts{margin:10px 0;min-width:0;max-width:100%}
+.tangui-thoughts.tangui-thoughts-reading{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;margin-bottom:0;overflow:hidden}
+.tangui-thoughts>button{flex:0 0 auto;align-self:flex-start;max-width:100%}
+.tangui-thoughts button,.tangui-thoughts select{min-height:40px;max-width:100%;font:inherit}
 .tangui-thoughts button:focus-visible,.tangui-thoughts select:focus-visible{outline:3px solid #60a5fa;outline-offset:2px}
-.tangui-thoughts-panel{margin-top:8px;padding:12px;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:10px;background:var(--dsw-alias-bg-layer-1,transparent);min-width:0}
-.tangui-thoughts-head,.tangui-thoughts-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tangui-thoughts-panel{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;max-height:calc(100vh - 190px);max-height:calc(100dvh - 190px);margin-top:8px;padding:12px;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:10px;background:var(--dsw-alias-bg-layer-1,transparent);overflow:hidden}
+.tangui-thoughts-head,.tangui-thoughts-controls{display:flex;flex:0 0 auto;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
 .tangui-thoughts-head{justify-content:space-between}
+.tangui-thoughts-description,.tangui-thoughts-summary{flex:0 0 auto}
 .tangui-thoughts-date{display:flex;align-items:center;gap:6px;flex:1 1 230px;min-width:0;white-space:nowrap}
 .tangui-thoughts-date select{width:100%;max-width:100%;min-width:0;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent);color:inherit}
+.tangui-thoughts-body{flex:1 1 auto;min-width:0;min-height:0;padding-right:4px;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
 .tangui-thoughts-item{padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2,#aaa);overflow-wrap:anywhere}
 .tangui-thoughts-meta{display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;font-size:13px}
+.tangui-thoughts-footer{margin-top:8px;padding-top:2px;background:var(--dsw-alias-bg-layer-1,transparent)}
+@media(max-width:420px){.tangui-thoughts-panel{padding:9px}.tangui-thoughts-controls{gap:6px}.tangui-thoughts-date{flex-basis:100%}}
 `;
-function PartnerThoughts({ actorId, actorName, baseUrl }) {
+const MANAGEMENT_CARD_CSS = `
+.tangui-session-status{box-sizing:border-box;min-width:0;max-width:100%;max-height:min(54vh,460px);max-height:min(54dvh,460px);overflow:auto}
+.tangui-session-status *,.tangui-session-status *::before,.tangui-session-status *::after{box-sizing:border-box}
+.tangui-session-collapsed{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;white-space:nowrap}
+.tangui-session-collapsed-copy{display:flex;align-items:baseline;gap:6px;flex:1 1 auto;min-width:0;overflow:hidden}
+.tangui-session-collapsed-copy strong{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tangui-session-collapsed-status{display:block;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8}
+.tangui-session-collapsed button{flex:0 0 auto;white-space:nowrap}
+.tangui-session-expanded{min-width:0;max-width:100%}
+.tangui-session-header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+.tangui-session-header-copy{display:flex;gap:8px;align-items:center;flex:1 1 auto;flex-wrap:wrap;min-width:0}
+.tangui-session-status.tangui-session-reading{display:flex;flex-direction:column;max-height:min(520px,calc(100vh - 180px));max-height:min(520px,calc(100dvh - 180px));overflow:hidden}
+.tangui-session-reading .tangui-session-expanded{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden}
+.tangui-session-reading .tangui-session-header{flex:0 0 auto}
+.tangui-session-reading .tangui-thoughts-head button,.tangui-session-reading .tangui-thoughts-controls button{min-height:32px;padding:4px 10px!important}
+@media(max-width:420px){.tangui-session-status{padding:8px!important}.tangui-session-header{gap:6px}.tangui-session-header-copy{gap:6px}}
+`;
+function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed = false }) {
   const [openFor, setOpenFor] = React.useState(null);
   const [mode, setMode] = React.useState('desc');
   const [date, setDate] = React.useState('');
@@ -215,13 +239,15 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
   const sequence = React.useRef(0);
   const request = React.useRef(null);
   const entryRef = React.useRef(null);
+  const openChangeRef = React.useRef(onOpenChange);
+  openChangeRef.current = onOpenChange;
   const panelId = React.useRef('tangui-thoughts-' + Math.random().toString(36).slice(2));
   let origin = '';
   try { origin = new URL(baseUrl).origin; } catch (_) {}
   const identity = JSON.stringify([origin, actorId]);
   const identityRef = React.useRef(identity);
   identityRef.current = identity;
-  const open = openFor === identity;
+  const open = openFor === identity && !collapsed;
   const view = data && data.key === identity ? data.value : null;
   const message = error && error.key === identity ? error.text : '';
   const text = value => typeof value === 'string' ? value : (typeof value === 'number' ? String(value) : '');
@@ -234,12 +260,23 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
     setMode('desc');
     setDate('');
     setLoading(false);
+    if (openChangeRef.current) openChangeRef.current(false);
     return () => {
       sequence.current += 1;
       if (request.current) request.current.abort();
       request.current = null;
     };
   }, [identity]);
+  React.useEffect(() => {
+    if (!collapsed) return;
+    stop();
+    setOpenFor(null);
+    setData(null);
+    setDates([]);
+    setStack([]);
+    setError(null);
+    if (openChangeRef.current) openChangeRef.current(false);
+  }, [collapsed, identity]);
   function stop() {
     sequence.current += 1;
     if (request.current) request.current.abort();
@@ -249,6 +286,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
   function close() {
     stop();
     setOpenFor(null);
+    if (openChangeRef.current) openChangeRef.current(false);
     if (entryRef.current) entryRef.current.focus();
   }
   function failure(code) {
@@ -317,6 +355,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
         setMode('desc');
         setDate('');
         setOpenFor(null);
+        if (openChangeRef.current) openChangeRef.current(false);
         setError({ key: requestIdentity, text: '伙伴身份已变化，请重新打开。' });
       } else {
         const messages = {
@@ -344,6 +383,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
     if (open) { close(); return; }
     if (!origin || !actorId) return;
     setOpenFor(identity);
+    if (openChangeRef.current) openChangeRef.current(true);
     setData(null);
     setError(null);
     setStack([]);
@@ -363,30 +403,22 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
     marginBottom: 0,
     background: active ? 'var(--dsw-alias-bg-layer-2,#dbeafe)' : 'transparent'
   });
-  return h('div', { className: 'tangui-thoughts' },
+  return h('div', {
+    className: open ? 'tangui-thoughts tangui-thoughts-reading' : 'tangui-thoughts',
+    onKeyDown: event => { if (open && event.key === 'Escape') { event.stopPropagation(); close(); } }
+  },
     h('style', null, PARTNER_THOUGHTS_CSS),
-    h('button', {
-      ref: entryRef,
-      type: 'button',
-      disabled: !origin || !actorId,
-      'aria-expanded': open,
-      'aria-controls': panelId.current,
-      'aria-busy': loading,
-      onClick: toggle,
-      style: { ...buttonStyle, minHeight: '42px', color: '#fff', background: '#2563eb', border: '1px solid #2563eb', fontWeight: 600 }
-    }, h('span', { 'aria-hidden': 'true' }, '💭 '), open ? '收起伙伴想法' : '查看伙伴想法'),
     message && !open && h('p', { role: 'alert', style: { color: '#d54949', margin: '6px 0' } }, message),
     open && h('section', {
       id: panelId.current,
       className: 'tangui-thoughts-panel',
       'aria-label': `${actorName || '伙伴'} 的想法`,
-      'aria-busy': loading,
-      onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } }
+      'aria-busy': loading
     },
       h('div', { className: 'tangui-thoughts-head' },
         h('strong', null, `${actorName || '伙伴'} 的想法`),
         h('button', { type: 'button', style: activeButton(false), onClick: close }, '关闭')),
-      h('p', { style: { margin: '5px 0 8px', fontSize: '13px', opacity: .78 } }, '伙伴主动写下的读帖感想、游戏短记与回想，仅存本机。'),
+      h('p', { className: 'tangui-thoughts-description', style: { margin: '5px 0 8px', fontSize: '13px', opacity: .78 } }, '伙伴写下的记录，仅存本机。'),
       h('div', { className: 'tangui-thoughts-controls' },
         h('button', { type: 'button', 'aria-pressed': mode === 'desc', disabled: loading, style: activeButton(mode === 'desc'), onClick: () => { if (mode !== 'desc') runQuery('desc', ''); } }, '最新在前'),
         h('button', { type: 'button', 'aria-pressed': mode === 'daily', disabled: loading || !view || view.timezone_known !== true, style: activeButton(mode === 'daily'), onClick: () => { if (mode !== 'daily') runQuery('daily', ''); } }, '按日回看'),
@@ -394,14 +426,14 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
           h('select', { value: date, disabled: loading || !dates.length, onChange: event => runQuery('daily', event.target.value) },
             h('option', { value: '' }, dates.length ? '选择日期' : '暂无可用日期'),
             dates.map(item => h('option', { key: item.date, value: item.date }, item.count === null ? item.date : `${item.date}（${item.count}）`))))),
-      h('p', { style: { margin: '6px 0', fontSize: '13px', opacity: .78 } },
+      h('p', { className: 'tangui-thoughts-summary', style: { margin: '6px 0', fontSize: '13px', opacity: .78 } },
         mode === 'desc' ? '跨日期，最新在前' : '按伙伴日期，从早到晚',
         view ? ` · ${view.display_timezone}` : '',
         view && view.timezone_known === false ? '（日记时区尚未同步，暂不能按日筛选）' : ''),
       message && h('p', { role: 'alert', style: { color: '#d54949', margin: '7px 0' } }, message),
       loading && h('p', { role: 'status', style: { margin: '7px 0' } }, '正在读取想法…'),
       !loading && !view && !message && mode === 'daily' && !date && h('p', null, '请选择一个伙伴日期。'),
-      h('div', { style: { maxHeight: 'min(55vh,480px)', overflowY: 'auto', paddingRight: '4px' } },
+      h('div', { className: 'tangui-thoughts-body' },
         view && !view.items.length && !loading && h('p', null, '还没有主动留下的想法', mode === 'daily' && date ? ` · ${date}` : ''),
         view && view.items.map((item, index) => {
           const localDate = text(item && item.local_date);
@@ -423,12 +455,22 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
             source && h('div', { title: sourceDetails || undefined, style: { fontSize: '13px', opacity: .78, marginTop: '4px' } }, '来源：', source),
             reflection && h('p', { style: { fontSize: '15px', lineHeight: 1.7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: '6px 0 0' } }, reflection));
         })),
-      h('div', { className: 'tangui-thoughts-controls', style: { marginTop: '8px' } },
+      h('div', { className: 'tangui-thoughts-controls tangui-thoughts-footer' },
         h('button', { type: 'button', style: activeButton(false), disabled: loading || !stack.length, onClick: () => void load(mode, date, stack.slice(0, -1)) }, '上一页'),
         h('button', { type: 'button', style: activeButton(false), disabled: loading || !view || !view.has_more || !view.next_cursor, onClick: () => { if (view && view.next_cursor) void load(mode, date, stack.concat([view.next_cursor])); } }, '下一页'),
         h('button', { type: 'button', style: activeButton(false), disabled: loading || (mode === 'daily' && !date), onClick: refresh }, message ? '重试' : '刷新'),
         view && h('small', {style: {opacity: .75}},
-          Number.isInteger(view.total) && view.total >= 0 ? `共 ${view.total} 条 · ` : '', `本页 ${view.items.length} 条`))));
+          Number.isInteger(view.total) && view.total >= 0 ? `共 ${view.total} 条 · ` : '', `本页 ${view.items.length} 条`))),
+    h('button', {
+      ref: entryRef,
+      type: 'button',
+      disabled: !origin || !actorId,
+      'aria-expanded': open,
+      'aria-controls': panelId.current,
+      'aria-busy': loading,
+      onClick: toggle,
+      style: { ...buttonStyle, marginTop: open ? '8px' : 0, marginBottom: 0, minHeight: '42px', color: 'var(--dsw-alias-text-on-accent,#fff)', background: 'var(--dsw-alias-bg-accent,#2563eb)', border: '1px solid var(--dsw-alias-border-accent,#2563eb)', fontWeight: 600 }
+    }, h('span', { 'aria-hidden': 'true' }, '💭 '), open ? '收起伙伴想法' : '查看伙伴想法'));
 }
 
     function ManagementCard({ sessionId }) {
@@ -437,7 +479,31 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
       const [error, setError] = React.useState('');
       const [busy, setBusy] = React.useState(false);
       const [inboxRefreshing, setInboxRefreshing] = React.useState(false);
+      const [thoughtsOpenFor, setThoughtsOpenFor] = React.useState(null);
+      const [dynamicsExpanded, setDynamicsExpanded] = React.useState(() => {
+        try { return window.localStorage.getItem('tangui.session-dynamics.expanded.v1') !== '0'; }
+        catch (_) { return true; }
+      });
       const bindingRevision = React.useRef(0);
+      const expandButtonRef = React.useRef(null);
+      const collapseButtonRef = React.useRef(null);
+      const detailsId = React.useRef('tangui-session-dynamics-' + Math.random().toString(36).slice(2));
+      const bindingIdentity = state?.binding ? JSON.stringify([state.platformUrl, state.binding.actorId]) : '';
+      React.useEffect(() => { setThoughtsOpenFor(null); }, [bindingIdentity]);
+      const rememberDynamicsExpanded = next => {
+        setDynamicsExpanded(next);
+        try { window.localStorage.setItem('tangui.session-dynamics.expanded.v1', next ? '1' : '0'); }
+        catch (_) {}
+      };
+      const expandDynamics = () => {
+        rememberDynamicsExpanded(true);
+        setTimeout(() => { if (collapseButtonRef.current) collapseButtonRef.current.focus(); }, 0);
+      };
+      const collapseDynamics = () => {
+        setThoughtsOpenFor(null);
+        rememberDynamicsExpanded(false);
+        setTimeout(() => { if (expandButtonRef.current) expandButtonRef.current.focus(); }, 0);
+      };
       React.useEffect(() => {
         if (!cardVisible) return;
         let disposed = false, timer, controller, reading = false;
@@ -494,36 +560,76 @@ function PartnerThoughts({ actorId, actorName, baseUrl }) {
       if (!cardVisible || !sessionId || !state) return null;
       const selected = state?.managementSession?.sessionId;
       const here = selected === sessionId;
-      const summary = state ? activitySummary(state) : null;
+      const summary = activitySummary(state);
+      const readingThoughts = dynamicsExpanded && thoughtsOpenFor === bindingIdentity && !!state?.binding;
       const smallButton = { ...buttonStyle, fontSize: '13px', padding: '4px 9px', marginBottom: 0 };
-      return h('section', { 'aria-label': '碳硅派对会话动态', className: 'tangui-session-status', style: { fontSize: '14px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px', overflowWrap: 'anywhere' } },
+      return h('section', {
+        'aria-label': '碳硅派对会话动态',
+        className: readingThoughts ? 'tangui-session-status tangui-session-reading' : 'tangui-session-status',
+        style: { fontSize: '14px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px', overflowWrap: 'anywhere' }
+      },
         h('style', null, SESSION_STATUS_CSS),
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-          h('strong', null, '碳硅派对', summary?.attention ? ' · 需要处理' : ''),
-          here ? h('span', null, '本会话接收动态') : !selected ? h('button', { type: 'button', style: smallButton, disabled: busy || !state?.managementSession,
-            onClick: () => void bind() }, '在此查看碳硅动态') : h('button', { type: 'button', style: smallButton, onClick: () => void open() }, '打开管理会话'),
-          selected && !here && h('details', null, h('summary', { style: { cursor: 'pointer' } }, '更换'), h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => void bind() }, '改到这个会话'))),
-        state?.binding && h(PartnerThoughts, { key: JSON.stringify([state.platformUrl, state.binding.actorId]), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
-        !state && !error && h('p', { style: { margin: '5px 0' } }, '正在读取动态…'),
-        state && !state.managementSession && h('p', null, '请在任务结束后重启 DSH，以加载会话动态功能。'),
-        state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
-        error && h('p', { role: 'status', style: { color: '#bd6d19', margin: '5px 0' } }, error),
-        here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
-        here && h(InboxReminder, { inbox: state.runtime?.inbox, platformUrl: state.platformUrl, onRefresh: refreshInbox, refreshLabel: inboxRefreshing ? '正在刷新…' : '刷新收件提醒' }),
-        here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
-        here && summary && h('div', null,
-          h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
-          h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
-            h('span', null, summary.modelPrefix),
-            summary.modelStage ? h('span', { className: `tangui-status-${summary.stageTone}` }, summary.modelStage) : h('span', { className: 'tangui-status-gray' }, summary.model),
-            h('span', null, summary.modelElapsed),
-            summary.modelResult && h('span', null, ' · ', h('span', { className: `tangui-status-${summary.resultTone}` }, summary.modelResult))),
-          h(ObservationSummary, { observation: state.runtime?.observation }),
-          summary.error && h('p', { role: 'alert', style: { margin: '5px 0', color: '#d54949' } }, summary.error),
-          h('details', null, h('summary', { style: { cursor: 'pointer' } }, '展开运行与模型记录'),
-            h('p', null, `累计模型调用 ${state.runtime?.model_calls ?? 0} 次 · 已接收回复 ${state.runtime?.replies ?? 0} 条 · 主动发帖 ${state.runtime?.posts ?? 0} 篇`),
-            h('div', { style: { maxHeight: 'min(40vh, 380px)', overflowY: 'auto' } }, h(ModelCallsPanel, { state }))),
-          h('small', { style: { opacity: .7 } }, '每 5 秒刷新 · 只展示状态，不触发 AI 回复')));
+        h('style', null, MANAGEMENT_CARD_CSS),
+        !dynamicsExpanded ? h('div', { className: 'tangui-session-collapsed' },
+          h('div', { className: 'tangui-session-collapsed-copy' },
+            h('strong', null, '碳硅派对'),
+            h('span', { className: 'tangui-session-collapsed-status', title: summary?.runtime || undefined }, summary?.attention ? '需要处理' : (summary?.runtime || '动态已就绪'))),
+          h('button', {
+            ref: expandButtonRef,
+            id: detailsId.current + '-collapsed',
+            type: 'button',
+            style: smallButton,
+            'aria-expanded': false,
+            'aria-controls': detailsId.current,
+            onClick: expandDynamics
+          }, '展开动态'),
+          h('span', { id: detailsId.current, hidden: true })) :
+          h('div', { id: detailsId.current, className: 'tangui-session-expanded' },
+            h('div', { className: 'tangui-session-header' },
+              h('div', { className: 'tangui-session-header-copy' },
+                h('strong', null, '碳硅派对', !readingThoughts && summary?.attention ? ' · 需要处理' : ''),
+                readingThoughts ? h('span', { style: { opacity: .75 } }, '伙伴想法') :
+                  here ? h('span', null, '本会话接收动态') : !selected ? h('button', { type: 'button', style: smallButton, disabled: busy || !state?.managementSession,
+                    onClick: () => void bind() }, '在此查看碳硅动态') : h('button', { type: 'button', style: smallButton, onClick: () => void open() }, '打开管理会话'),
+                !readingThoughts && selected && !here && h('details', null,
+                  h('summary', { style: { cursor: 'pointer' } }, '更换'),
+                  h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => void bind() }, '改到这个会话'))),
+              h('button', {
+                ref: collapseButtonRef,
+                type: 'button',
+                style: { ...smallButton, flexShrink: 0 },
+                'aria-expanded': true,
+                'aria-controls': detailsId.current,
+                onClick: collapseDynamics
+              }, '收起动态')),
+            !readingThoughts && h('div', null,
+              !state.managementSession && h('p', null, '请在任务结束后重启 DSH，以加载会话动态功能。'),
+              state?.managementSession?.storageError && h('p', { role: 'alert' }, '管理会话设置未能保存；社区任务不受影响。'),
+              error && h('p', { role: 'status', style: { color: '#bd6d19', margin: '5px 0' } }, error),
+              here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
+              here && h(InboxReminder, { inbox: state.runtime?.inbox, platformUrl: state.platformUrl, onRefresh: refreshInbox, refreshLabel: inboxRefreshing ? '正在刷新…' : '刷新收件提醒' }),
+              here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
+              here && summary && h('div', null,
+                h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
+                h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
+                  h('span', null, summary.modelPrefix),
+                  summary.modelStage ? h('span', { className: `tangui-status-${summary.stageTone}` }, summary.modelStage) : h('span', { className: 'tangui-status-gray' }, summary.model),
+                  h('span', null, summary.modelElapsed),
+                  summary.modelResult && h('span', null, ' · ', h('span', { className: `tangui-status-${summary.resultTone}` }, summary.modelResult))),
+                h(ObservationSummary, { observation: state.runtime?.observation }),
+                summary.error && h('p', { role: 'alert', style: { margin: '5px 0', color: '#d54949' } }, summary.error),
+                h('details', null, h('summary', { style: { cursor: 'pointer' } }, '展开运行与模型记录'),
+                  h('p', null, `累计模型调用 ${state.runtime?.model_calls ?? 0} 次 · 已接收回复 ${state.runtime?.replies ?? 0} 条 · 主动发帖 ${state.runtime?.posts ?? 0} 篇`),
+                  h('div', { style: { maxHeight: 'min(40vh, 380px)', overflowY: 'auto' } }, h(ModelCallsPanel, { state }))),
+                h('small', { style: { opacity: .7 } }, '每 5 秒刷新 · 只展示状态，不触发 AI 回复'))),
+            state?.binding && h(PartnerThoughts, {
+              key: bindingIdentity,
+              actorId: state.binding.actorId,
+              actorName: state.binding.actorName || 'AI伙伴',
+              baseUrl: state.platformUrl,
+              collapsed: !dynamicsExpanded,
+              onOpenChange: isOpen => setThoughtsOpenFor(isOpen ? bindingIdentity : null)
+            })));
     }
 
     const draftKey = (kind, state) => `tangui-draft-v1:${kind}:${JSON.stringify([state.platformUrl || '', state.binding?.actorId || '', state.memoryDir || ''])}`;

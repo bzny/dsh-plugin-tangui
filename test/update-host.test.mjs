@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { Context, Service } from '@deepseek-ai/cordis';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -106,6 +106,47 @@ test('host distinguishes installer errors and installed-file mismatch without pe
         return true;
       });
     }
+  } finally {
+    assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
+  }
+});
+
+test('Git upgrades resolve the pinned commit, including after an explicitly named offline recovery', async () => {
+  const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'host-pnpm-git-'));
+  const packageRoot = join(root, 'node_modules', 'dsh-plugin-tangui');
+  mkdirSync(join(packageRoot, 'lib'), { recursive: true });
+  const profileFile = join(root, 'package.json'), manifestFile = join(packageRoot, 'package.json');
+  writeFileSync(profileFile, JSON.stringify({ dependencies: { 'dsh-plugin-tangui': 'github:bzny/dsh-plugin-tangui#v0.5.8', 'another-plugin': '1.0.0' } }));
+  writeFileSync(manifestFile, JSON.stringify({ name: 'dsh-plugin-tangui', version: '0.5.8' }));
+  writeFileSync(join(packageRoot, 'cordis.patch.yml'), '[]');
+  writeFileSync(join(packageRoot, 'lib/index.js'), 'export function apply() {}');
+  const ctx = { get: name => name === 'profileContext' ? { dir: root, installAnchor: profileFile } : undefined };
+  const commit = 'b'.repeat(40), target = { version: '0.5.9', commit, spec: `github:bzny/dsh-plugin-tangui#${commit}` };
+  const commands = [];
+  try {
+    const adapter = createHostUpdateAdapter(ctx, { packageRoot, reconcile: async () => ({}),
+      withFileLock: (_file, run) => run(), runProfilePnpm: async (_context, args) => {
+        commands.push(args);
+        const spec = args.at(-1), recovery = args.includes('--offline');
+        assert.ok(args.includes('--ignore-scripts'));
+        if (recovery) assert.match(spec, /^dsh-plugin-tangui@file:/);
+        else assert.equal(spec, target.spec, 'an alias would let pnpm incorrectly keep the previous resolution');
+        const pkg = JSON.parse(readFileSync(profileFile, 'utf8'));
+        pkg.dependencies['dsh-plugin-tangui'] = spec.replace(/^dsh-plugin-tangui@/, '');
+        writeFileSync(profileFile, JSON.stringify(pkg));
+        writeFileSync(manifestFile, JSON.stringify({ name: 'dsh-plugin-tangui', version: recovery ? '0.5.8' : '0.5.9' }));
+        return { exitCode: 0 };
+      } });
+    const snapshot = await adapter.host.snapshot();
+    await adapter.host.install(target);
+    await adapter.host.restore(snapshot);
+    const recovered = await adapter.host.snapshot();
+    assert.equal(recovered.version, '0.5.8');
+    await adapter.host.install(target);
+    assert.equal(commands.length, 3);
+    assert.equal(JSON.parse(readFileSync(manifestFile, 'utf8')).version, '0.5.9');
+    assert.equal(JSON.parse(readFileSync(profileFile, 'utf8')).dependencies['another-plugin'], '1.0.0');
   } finally {
     assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
   }

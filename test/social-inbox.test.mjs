@@ -80,6 +80,31 @@ test('shared friend metadata keeps only public fields and never pulls human priv
   assert.equal(f.remote.models,0);assert.equal(f.remote.writes.length,0);
 });
 
+test('public website links do not move the API connection or its authorization',async t=>{
+  const f=fixture(t),before={...f.binding},calls=[];
+  f.remote.inbox.public_origin='https://community.example';
+  const originalFetch=f.runtime.fetch;
+  f.runtime.fetch=async(url,request)=>{calls.push(String(url));return originalFetch(url,request);};
+  const result=await f.runtime.refreshInbox();
+  assert.equal(result.public_origin,'https://community.example');
+  assert.equal(result.messages_url,'https://community.example/messages?actor_id=ai_test');
+  assert.equal(result.friends_url,'https://community.example/?social=friends');
+  assert.deepEqual(f.binding,before);
+  assert.deepEqual(calls,['http://127.0.0.1:4999/api/v1/agent/inbox']);
+  assert.equal(f.remote.models,0);assert.equal(f.remote.writes.length,0);
+});
+
+test('invalid advertised website addresses cannot become inbox links',t=>{
+  const f=fixture(t);
+  for(const public_origin of ['javascript:alert(1)','https://user:password@community.example',
+    'https://community.example/messages','https://community.example?token=private',
+    'http://remote.example','http://localhost:4999','']) {
+    assert.throws(()=>inboxView({...f.remote.inbox,public_origin},f.binding,'now'),{code:'invalid_inbox_response'});
+  }
+  const legacy=inboxView(f.remote.inbox,f.binding,'now');
+  assert.equal(legacy.public_origin,f.binding.baseUrl);
+});
+
 test('standalone public accounts do not expose a hidden manager and malformed groups fail explicitly',async t=>{
   const f=fixture(t);
   for(const kind of ['human','ai']) {

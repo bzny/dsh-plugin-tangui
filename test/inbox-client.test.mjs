@@ -214,7 +214,20 @@ test('friend notices without recipient metadata keep neutral wording even for pa
   assert.doesNotMatch(mounted.text(), /想加我|申请与我们/);
 });
 
-test('cross-origin inbox links are never rendered and empty inbox stays silent', async () => {
+test('validated public website is used even when the API connection is loopback', async () => {
+  const harness = createHarness();
+  const inbox = inboxFixture({ public_origin:'https://community.example' });
+  const state = { ...registrationState(inbox), platformUrl:'http://127.0.0.1:4180' };
+  const registered = loadPlugin(harness.React, async () => ({ ok:true,status:200,json:async()=>state }));
+  const mounted = mountCard(harness,registered['tangui-activity'].component,'sess-1');
+  await mounted.ready();
+  const hrefs=mounted.find(node=>node.type==='a').map(node=>String(node.props.href));
+  assert.ok(hrefs.includes(inbox.messages_url));assert.ok(hrefs.includes(inbox.friends_url));
+  assert.ok(hrefs.every(href=>!href.includes('127.0.0.1')));
+  assert.match(mounted.text(),/查看 AI 消息/);
+});
+
+test('links outside the declared website are never rendered and empty inbox stays silent', async () => {
   const harness = createHarness();
   const evil = inboxFixture({ messages_url: 'https://evil.example/messages', friends_url: 'javascript:alert(1)' });
   const registered = loadPlugin(harness.React, async () => ({ ok: true, status: 200, json: async () => registrationState(evil) }));
