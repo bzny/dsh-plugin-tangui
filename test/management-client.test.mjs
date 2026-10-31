@@ -32,8 +32,8 @@ function page(initial, sessionId = 'session-current', visible = true, slot = 'co
       if (failed) throw new Error('private upstream message must not display');
       if (options.method === 'POST') {
         const body = JSON.parse(options.body);
-        assert.equal(body.action, 'management_bind');
-        state = { ...state, managementSession: { sessionId: body.sessionId } };
+        if (body.action === 'model_failure_samples') state = { ...state, failureSamples: { ...state.failureSamples, enabled: body.enabled } };
+        else { assert.equal(body.action, 'management_bind'); state = { ...state, managementSession: { sessionId: body.sessionId } }; }
       }
       return { ok: true, json: async () => structuredClone(state) };
     },
@@ -57,6 +57,36 @@ function find(node, predicate) { if (!node || typeof node !== 'object') return n
 const button = (tree, label) => find(tree, n => n.type === 'button' && text(n) === label);
 const fixture = () => ({ managementSession: { sessionId: null }, binding: { actorName: '测试伙伴' }, modelLogs: [],
   runtime: { state: 'stopped', running: false, model_calls: 2, replies: 1, posts: 0 } });
+
+test('retrying card stays orange, shows attempt count, and does not call a recoverable attempt a terminal failure', async () => {
+  const state = fixture(); state.managementSession.sessionId = 'session-current'; state.runtime.running = true; state.runtime.state = 'thinking';
+  state.modelLogs = [{ call_id: '12345678-1234-4321-8123-123456789abc', purpose: 'community_reply', phase: 'waiting_retry', retry_status: 'scheduled', attempt: 1, max_attempts: 3, elapsed_ms: 100 }];
+  const ui = page(state); ui.render(); let tree = await ui.settle();
+  assert.match(text(tree), /等待重试.*第 1 次\/最多 3 次/);
+  assert.ok(find(tree, n => n.props.className === 'tangui-status-orange' && /等待重试/.test(text(n))));
+  assert.doesNotMatch(text(tree), /需要处理|连续尝试后未完成/);
+  state.modelLogs[0] = { ...state.modelLogs[0], phase: 'failed', retry_status: 'exhausted', attempt: 3 }; ui.setState(state); tree = await ui.poll();
+  assert.match(text(tree), /需要处理/); assert.match(text(tree), /连续尝试后未完成.*第 3 次/); ui.dispose();
+});
+
+test('failure sample toggle uses authenticated settings action while log card remains read-only', async () => {
+  const state = { ...fixture(), platformUrl: 'https://community.example', memoryDir: 'M', draft: { name: '', description: '', overrides: {} }, runtimeConnection: {},
+    failureSamples: { enabled: false, directory: 'C:\\fixture\\model-failures', count: 0, max_count: 20, max_age_days: 7, max_bytes: 262144 } };
+  state.modelLogs = [{ call_id: '12345678-1234-4321-8123-123456789abc', purpose: 'community_reply', phase: 'failed', event: 'finished', time: '2026-11-01T00:00:00Z',
+    validation_reason: 'field_type', validation_field: 'participate', failure_sample_id: '12345678-1234-4321-8123-123456789abc' }];
+  const ui = page(state, 'session-current', true, 'settings.section'); ui.render(); let tree = await ui.settle();
+  let node = find(tree, n => typeof n.type === 'function' && n.type.name === 'ModelCallsPanel');
+  let panel = ui.mount(node); assert.match(text(panel), /是否回复（participate）/); assert.match(text(panel), /256 KB.*20 条.*7 天/);
+  const toggle = find(panel, n => n.type === 'input' && n.props.type === 'checkbox'); assert.ok(toggle); assert.equal(toggle.props.checked, false);
+  toggle.props.onChange({ target: { checked: true } }); tree = await ui.settle();
+  node = find(tree, n => typeof n.type === 'function' && n.type.name === 'ModelCallsPanel'); panel = ui.mount(node);
+  assert.equal(find(panel, n => n.type === 'input' && n.props.type === 'checkbox').props.checked, true);
+  assert.deepEqual(JSON.parse(ui.requests.find(r => r.options.method === 'POST').options.body), { action: 'model_failure_samples', enabled: true });
+  const readOnly = ui.mount({ type: node.type, props: { state } }); assert.equal(find(readOnly, n => n.type === 'input'), null);
+  state.modelLogs[0].validation_field = 'PRIVATE_UNKNOWN_FIELD';
+  assert.doesNotMatch(text(ui.mount({ type: node.type, props: { state } })), /PRIVATE_UNKNOWN_FIELD/);
+  ui.dispose();
+});
 
 test('management conversation reminder links to the exact pending draft with no publish action', async () => {
   const state = fixture(); state.managementSession.sessionId = 'session-current';

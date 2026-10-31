@@ -8,6 +8,7 @@ import { atomicState, readState } from '../lib/runtime-api.js';
 import { LocalDiary } from '../lib/local-diary.js';
 import { newLife, lifeView, parseGameLife, applyLifeResult } from '../lib/companion-life.js';
 import { serviceGameLife, reserveSeriesCall, reserveGameCall, publicLifeStatus, pauseAutoplay } from '../lib/game-life-runtime.js';
+import { createRuntimeModel } from '../lib/runtime-model.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
 const choice = { game_id: 'fixture-game', settings: { player_count: 2 } };
@@ -91,6 +92,24 @@ test('state decay approaches a personal baseline without adding experiences or c
   assert.deepEqual(lifeView(l, 6 * 3600000).values, { mood: 70, interest: 30, pressure: 60 });
   assert.equal(l.attempts && Object.keys(l.attempts).length, 0);
   assert.equal(l.values.mood, 90);
+});
+
+test('game reflection retries preserve one result and charge series or room budget on each actual dispatch', async t => {
+  for (const session of [true, false]) {
+    const f = fixture(t, { session }); f.finish();
+    f.r.connectionReady = async () => {};
+    let calls = 0;
+    f.r.lifeModel = createRuntimeModel(() => ({ agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) }, llm: {
+      async prepareCall(config) { calls++; const raw = calls === 1 ? 'invalid' : JSON.stringify(decision({ next_activity: 'rest' }));
+        return { config, async *stream() { yield { type: 'text-delta', index: 0, text: raw }; yield { type: 'finish', reason: { kind: 'stop' } }; } }; }
+    } }), { purpose: 'game_reflection', parse: parseGameLife, retryDelays: [0, 0] });
+    await serviceGameLife(f.r);
+    assert.equal(calls, 2); assert.equal(f.r.state.companion_life.attempts['room:room-1'].status, 'completed');
+    assert.equal(session ? f.r.state.companion_life.series['session-fixture'].calls : f.r.gameRuntime.state.journals['room-1'].modelCalls, session ? 2 : 5);
+    const entries = f.r.diary.status().entry_count;
+    await serviceGameLife(f.r); assert.equal(calls, 2); assert.equal(f.r.diary.status().entry_count, entries);
+    assert.equal(f.r.state.model_calls, 4, 'game reflection must not reset or charge the community budget');
+  }
 });
 test('bad numeric values and ungrounded relationship impressions reject the result', () => {
   assert.throws(() => parseGameLife(JSON.stringify(decision({ state: { mood: 101, interest: 50, pressure: 50 } }))), { code: 'invalid_model_decision' });

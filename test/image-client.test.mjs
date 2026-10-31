@@ -5,6 +5,7 @@ import {createRuntimeModel,parseDecision} from '../lib/runtime-model.js';
 import {RuntimeApi} from '../lib/runtime-api.js';
 import {registerRuntimeTool,validateRuntimeInput} from '../lib/runtime-tool.js';
 import {EngagementClient,validateEngagement} from '../lib/engagement-client.js';
+import {publicDiscussion,CommunityRuntime} from '../lib/runtime.js';
 
 const image=(id='image_one',extra={})=>({type:'image',id,image_id:id,label:'上传者自述，不是识别事实',available:true,animated:false,width:320,height:200,...extra});
 const discussion=(images=[image()])=>({post:{id:'post_one',body:'正文'},comments:[{id:'comment_one',attachments:images}],reply_to_comment_id:'comment_one'});
@@ -76,6 +77,40 @@ test('explicit shortcodes resolve only to exact available catalog entries and pr
   assert.deepEqual(validateEngagement(input),input);
   await assert.rejects(()=>new EngagementClient({}, {write:async()=>{writes++;}}).execute(input,'original-key'),{code:'sticker_codes_not_resolved'});
   assert.equal(writes,0);
+});
+
+test('saved individual stickers use the existing bounded recommendation request and accept empty display text',async()=>{
+  const calls=[];
+  const result=await availableStickers(async path=>{calls.push(path);return {data:path.endsWith('/policy') ?
+    {recommended_stickers_path:'/api/v1/stickers/recommended'} :
+    {id:'saved_stickers',official:false,selection_source:'saved',selection_kind:'items',title:'收藏的单张表情',
+      items:[{id:'sticker_favorite',available:true,label:'微笑',shortcode:':gpt_smile:'},
+        {id:'sticker_unavailable',available:false,label:'已下架'}]}};});
+  assert.equal(calls.length,2);assert.equal(result.length,1);
+  assert.equal(result[0].shortcode,':gpt_smile:');
+  const context=publicDiscussion({id:'post_1',body:':gpt_smile:',display_body:'',content:[{type:'text',text:':gpt_smile:'}]},
+    [{id:'comment_1',body:'开心 :gpt_smile:',display_body:'开心'}],{id:'ai_1'},null,false,{});
+  assert.equal(context.post.body,'');assert.equal(context.post.content[0].text,'');
+  assert.equal(context.comments[0].body,'开心');
+});
+
+test('explicit saved-sticker listing validates pagination and only reads the own collection',async()=>{
+  validateRuntimeInput({action:'sticker_saved',cursor:'1',limit:10});
+  assert.throws(()=>validateRuntimeInput({action:'sticker_saved',scope:'mine'}));
+  assert.throws(()=>validateRuntimeInput({action:'sticker_saved',limit:200}));
+  const calls=[];
+  const binding={baseUrl:'http://127.0.0.1:4180',token:'isolated-test-token',actorId:'ai_test'};
+  const runtime={binding:()=>binding,connection:{binding:()=>binding},fetch:async(url,options)=>{
+    calls.push({url,options});return new Response(JSON.stringify({data:[{id:'sticker_favorite'}],next_cursor:null}),{status:200});
+  }};
+  const result=await CommunityRuntime.prototype.stickerCatalogQuery.call(runtime,{action:'sticker_saved',cursor:'1',limit:10});
+  assert.equal(result.data[0].id,'sticker_favorite');
+  assert.equal(calls.length,1);assert.equal(calls[0].options.method,'GET');
+  const url=new URL(calls[0].url);
+  assert.equal(url.pathname,'/api/v1/stickers/items');assert.equal(url.searchParams.get('scope'),'saved');
+  assert.equal(url.searchParams.get('cursor'),'1');assert.equal(url.searchParams.get('limit'),'10');
+  runtime.connection.binding=()=>({...binding,actorId:'ai_other'});
+  await assert.rejects(()=>CommunityRuntime.prototype.stickerCatalogQuery.call(runtime,{action:'sticker_saved'}),{code:'runtime_identity_mismatch'});
 });
 
 test('bounded image selection uses DSH attachment references, labels animation limits and omits excess',async()=>{

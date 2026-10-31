@@ -23,7 +23,7 @@ function harness(chunks, options = {}) {
         }
       } };
     } },
-  }), { onDiagnostic: value => f.diagnostics.push(value), ...options });
+  }), { maxAttempts: 1, onDiagnostic: value => f.diagnostics.push(value), ...options });
   return f;
 }
 

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createDshNormalizer, currentModelName, DEFAULT_NORMALIZATION_TIMEOUT_MS, DEFAULT_NORMALIZATION_MAX_TOKENS } from '../lib/dsh-normalizer.js';
+import { createDshNormalizer as createNormalizer, currentModelName, DEFAULT_NORMALIZATION_TIMEOUT_MS, DEFAULT_NORMALIZATION_MAX_TOKENS } from '../lib/dsh-normalizer.js';
+// Keep per-attempt parsing assertions separate from the default retry contract.
+const createDshNormalizer = (ctx, options = {}) => createNormalizer(ctx, { maxAttempts: 1, ...options });
 import { parseNormalizedPersona, PERSONA_FIELDS } from '../lib/persona-normalization.js';
 
 const description = '  我是岛风酱，是提督的秘书舰。我叫用户「提督」。语气活泼但做事认真。喜欢麻将。\n';

@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { GameRuntime } from '../lib/game-runtime.js';
+import { createDshGameDecider } from '../lib/game-model.js';
 
 const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
 const ACTOR = { id: 'fixture-ai', kind: 'ai', name: '隔离测试伙伴' };
@@ -187,6 +188,22 @@ async function settle(f, predicate) {
   }
   assert.equal(Boolean(predicate()), true, 'runtime did not reach the expected isolated state');
 }
+
+test('game retries count every dispatch, submit one legal choice, and stop at the existing room budget', async t => {
+  for (const validAfterFailure of [true, false]) {
+    const f = await fixture(t); await connect(f, 2); await ready(f); f.request();
+    let calls = 0;
+    const ctx = { agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) }, llm: {
+      async prepareCall(config) { calls++; const raw = calls === 2 && validAfterFailure ? '{"action_id":"pass"}' : 'invalid JSON';
+        return { config, async *stream() { yield { type: 'text-delta', index: 0, text: raw }; yield { type: 'finish', reason: { kind: 'stop' } }; } }; }
+    } };
+    f.runtime.decide = createDshGameDecider(ctx, { retryDelays: [0, 0], monotonic: f.runtime.monotonic });
+    await settle(f, () => ['accepted', 'model_failed'].includes(f.runtime.state.journals['fixture-room']?.requests['fixture-turn-1']?.status));
+    assert.equal(calls, 2); assert.equal(f.saved().journals['fixture-room'].modelCalls, 2);
+    assert.equal(f.remote.actions.size, validAfterFailure ? 1 : 0);
+    if (!validAfterFailure) assert.equal(f.saved().journals['fixture-room'].requests['fixture-turn-1'].error, 'budget_exhausted');
+  }
+});
 
 test('private game memory note is saved locally and never enters the action HTTP body', async t => {
   const f = await fixture(t, { decide: async () => ({ action_id: 'pass', commentary: '这次先观察。', memory_note: 'PRIVATE_GAME_NOTE' }) });

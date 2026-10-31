@@ -15,7 +15,8 @@ const PRIVATE_URL = `https://private.example/v1?api_key=${PRIVATE_KEY}`;
 const RAW_ERROR = `PRIVATE_UPSTREAM_ERROR ${PRIVATE_URL}`;
 const FIELDS = ['time', 'call_id', 'client', 'purpose', 'event', 'phase', 'model', 'provider', 'max_tokens',
   'timeout_ms', 'timeout_kind', 'deadline_remaining_ms', 'elapsed_ms', 'first_output_ms', 'text_characters', 'reasoning_characters',
-  'input_tokens', 'output_tokens', 'finish_kind', 'error_code'].sort();
+  'input_tokens', 'output_tokens', 'finish_kind', 'error_code', 'retry_group_id', 'attempt', 'max_attempts',
+  'validation_reason', 'validation_field', 'retry_status', 'retry_after_ms', 'failure_sample_id'].sort();
 const metadata = { purpose: 'community_reply', model: 'fixture-model', provider: 'fixture-provider', maxTokens: 64000, timeoutMs: 180000 };
 const delta = (text, index = 1, kind = 'text') => ({ type: `${kind}-delta`, index, text });
 const finish = (kind = 'stop', code) => ({ type: 'finish', reason: { kind,
@@ -79,7 +80,8 @@ function historyRow(date, index, overrides = {}) {
     model: 'fixture-model', provider: 'fixture-provider', max_tokens: 64000, timeout_ms: 180000,
     timeout_kind: 'total_deadline', deadline_remaining_ms: null, elapsed_ms: 1200, first_output_ms: 50,
     text_characters: 100, reasoning_characters: 200, input_tokens: 80, output_tokens: 30,
-    finish_kind: 'stop', error_code: null, ...overrides };
+    finish_kind: 'stop', error_code: null, retry_group_id: null, attempt: null, max_attempts: null,
+    validation_reason: null, validation_field: null, retry_status: null, retry_after_ms: null, failure_sample_id: null, ...overrides };
 }
 
 test('history loading rebuilds fixed fields, drops invalid identity rows and sanitizes old contents again', t => {
@@ -273,13 +275,13 @@ const personaDescription = '我的名字是岛风。';
 const personaResult = { name: { value: '岛风', evidence: '名字是岛风' }, overrides: Object.fromEntries(PERSONA_FIELDS.map(key => [key, null])) };
 const adapterCases = [
   { name: 'community', purpose: 'community_reply', result: { participate: true, body: '公开回应' },
-    create: (ctx, opts) => { const run = createRuntimeModel(() => ctx, opts); return signal => run({ post: PRIVATE_TEXT }, signal); },
+    create: (ctx, opts) => { const run = createRuntimeModel(() => ctx, { ...opts, maxAttempts: 1 }); return signal => run({ post: PRIVATE_TEXT }, signal); },
     failureCode: 'runtime_model_transport', loggedFailure: 'runtime_model_transport', cancelCode: 'run_stopped' },
   { name: 'normalizer', purpose: 'persona_normalization', result: personaResult,
-    create: (ctx, opts) => { const run = createDshNormalizer(ctx, opts); return signal => run({ description: personaDescription }, signal); },
-    failureCode: 'normalization_model_failed', loggedFailure: 'TRANSPORT', cancelCode: 'normalization_timeout' },
+    create: (ctx, opts) => { const run = createDshNormalizer(ctx, { ...opts, maxAttempts: 1 }); return signal => run({ description: personaDescription }, signal); },
+    failureCode: 'normalization_model_failed', loggedFailure: 'TRANSPORT', cancelCode: 'run_stopped' },
   { name: 'game', purpose: 'game_decision', result: { action_id: 'pass', commentary: '等待' },
-    create: (ctx, opts) => { const run = createDshGameDecider(ctx, { ...opts, monotonic: () => 0 });
+    create: (ctx, opts) => { const run = createDshGameDecider(ctx, { ...opts, maxAttempts: 1, monotonic: () => 0 });
       return signal => run({ action_request: { legal_actions: [{ action_id: 'pass' }] } }, { signal, deadline: 5000 }); },
     failureCode: 'game_model_failed', loggedFailure: 'TRANSPORT', cancelCode: 'game_decision_cancelled' },
 ];

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createDshGameDecider } from '../lib/game-model.js';
+import { createDshGameDecider as createGameModel } from '../lib/game-model.js';
+// Single-attempt contract fixtures; default bounded recovery is covered in model-retry.test.mjs.
+const createDshGameDecider = (ctx, options = {}) => createGameModel(ctx, { maxAttempts: 1, ...options });
 
 const snapshot = () => ({
   protocol: 'carbon-silicon.turn-game.v1',

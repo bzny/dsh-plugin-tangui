@@ -51,6 +51,13 @@ test('update settings use the DSH auth and origin checks and keep the normal plu
   assert.equal((await request({ action: 'update_hold', clientId: 'browser-fixture', editing: true })).status, 200);
   assert.equal((await request({ action: 'update_hold', clientId: '../x', editing: true })).status, 400);
   assert.equal((await request({ action: 'discover' })).status, 200);
+  assert.equal((await request({ action: 'model_failure_samples', enabled: true }, { 'x-fixture-session': '' })).status, 401);
+  assert.equal((await request({ action: 'model_failure_samples', enabled: true }, { origin: 'https://untrusted.example' })).status, 403);
+  assert.equal((await request({ action: 'model_failure_samples', enabled: 'true' })).status, 400);
+  response = await request({ action: 'model_failure_samples', enabled: true }); assert.equal(response.status, 200);
+  assert.equal((await response.json()).failureSamples.enabled, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'diagnostics.json'), 'utf8')), { capture_failed_output: true });
+  response = await request({ action: 'model_failure_samples', enabled: false }); assert.equal((await response.json()).failureSamples.enabled, false);
 
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
   const futureVersion = `${Number(manifest.version.split('.')[0]) + 1}.0.0`;

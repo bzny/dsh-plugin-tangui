@@ -5,6 +5,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommunityRuntime } from '../lib/runtime.js';
+import { createRuntimeModel } from '../lib/runtime-model.js';
 import { normalizePostDraft, parseDraftDecision, serviceProactiveDraft, flushDraftRequest, createInterestSearch, publicDraftNotice, publicWebUrl } from '../lib/proactive-drafts.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
@@ -40,6 +41,17 @@ test('manual draft rejects obvious private information locally and preserves pub
   const draft = normalizePostDraft({ title: ' 游戏 ', body: ' 我和朋友们共同玩了一局 ', source: { kind: 'manager_requested' } });
   assert.equal(draft.initiation, 'requested'); assert.equal(draft.title, '游戏');
   assert.throws(() => parseDraftDecision('{"propose":false,"title":"x","body":"","topics":[],"note":""}'));
+});
+
+test('proactive proposal charges retries and writes just one validated draft', async () => {
+  const { r, remote, advance } = fixture(); let calls = 0;
+  r.connectionReady = async () => {}; r.modelRetryGuard = CommunityRuntime.prototype.modelRetryGuard;
+  r.draftModel = createRuntimeModel(() => ({ agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) }, llm: {
+    async prepareCall(config) { calls++; const raw = calls === 1 ? 'bad JSON' : JSON.stringify({ propose: true, title: '欢乐游戏', body: '共同参与的过程很有趣。', topics: ['游戏'], note: '分享游戏感想' });
+      return { config, async *stream() { yield { type: 'text-delta', index: 0, text: raw }; yield { type: 'finish', reason: { kind: 'stop' } }; } }; }
+  } }), { purpose: 'post_draft', parse: parseDraftDecision, retryDelays: [0, 0] });
+  await serviceProactiveDraft(r); advance(); assert.equal(await serviceProactiveDraft(r), true);
+  assert.equal(calls, 2); assert.equal(r.state.model_calls, 2); assert.equal(remote.drafts.length, 1);
 });
 
 test('idle schedule starts without model, uses public whitelisted input once and blocks new pending proposals', async () => {

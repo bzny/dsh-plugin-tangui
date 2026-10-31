@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommunityRuntime } from '../lib/runtime.js';
-import { LocalDiary } from '../lib/local-diary.js';
+import { LocalDiary, parseDiary } from '../lib/local-diary.js';
 import { createRuntimeModel } from '../lib/runtime-model.js';
 import { createDshGameDecider } from '../lib/game-model.js';
 import { createModelCallLogger, safeModelCallId } from '../lib/model-call-log.js';
@@ -85,6 +85,83 @@ function runtimeFixture(t, decide) {
   return { runtime, submissions, preferenceReads, invoke: (postId = 'post-fixture') => runtime.decideOn(postId, `browse:${postId}`, null, null, {}) };
 }
 const reportedDecision = value => async (context, signal, diagnostic, onCall) => { onCall(CALL_ID); return value; };
+
+function retryModel(outputs, options = {}) {
+  const f = { calls: 0 };
+  f.decide = createRuntimeModel(() => ({ agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) },
+    llm: { async prepareCall(config) {
+      const value = outputs[Math.min(f.calls++, outputs.length - 1)];
+      return { config, async *stream() {
+        yield { type: 'text-delta', index: 0, text: typeof value === 'string' ? value : JSON.stringify(value) };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      } };
+    } } }), { retryDelays: [0, 0], ...options });
+  return f;
+}
+
+test('community invalid output retries are charged durably and only one valid reply reaches submission', async t => {
+  const model = retryModel(['bad JSON', response]); const f = runtimeFixture(t, model.decide);
+  await f.invoke();
+  assert.equal(model.calls, 2); assert.equal(f.runtime.state.model_calls, 2);
+  assert.equal(JSON.parse(readFileSync(f.runtime.stateFile, 'utf8')).model_calls, 2);
+  assert.equal(f.submissions.length, 1); assert.equal(f.submissions[0].body.body, response.body);
+  assert.equal(f.runtime.state.replies, 1);
+  assert.equal(new Set(f.runtime.state.completed).size, f.runtime.state.completed.length);
+});
+
+test('community exhausted retries or budget write no reply, thought or read-completion', async t => {
+  for (const budget of [1, 2, 5]) {
+    const model = retryModel(['bad JSON']); const f = runtimeFixture(t, model.decide);
+    f.runtime.limits.max_model_calls = budget;
+    await assert.rejects(f.invoke(), { code: budget < 3 ? 'budget_exhausted' : 'invalid_model_decision' });
+    assert.equal(model.calls, Math.min(3, budget)); assert.equal(f.runtime.state.model_calls, Math.min(3, budget));
+    assert.equal(f.runtime.state.pending, null); assert.equal(f.submissions.length, 0);
+    assert.equal(f.runtime.state.completed.length, 0); assert.equal(f.runtime.diary.status().entry_count, 0);
+    assert.equal(JSON.parse(readFileSync(f.runtime.stateFile, 'utf8')).model_calls, Math.min(3, budget));
+  }
+});
+
+test('successful retry followed by an unknown submission receipt resends same request without regenerating', async t => {
+  const model = retryModel(['bad JSON', response]); const f = runtimeFixture(t, model.decide), write = f.runtime.write;
+  f.runtime.write = async (...args) => { await write(...args); throw Object.assign(new Error('lost receipt'), { code: 'network_error' }); };
+  await assert.rejects(f.invoke(), { code: 'network_error' });
+  f.runtime.write = write; await f.runtime.flushPending();
+  assert.equal(model.calls, 2); assert.equal(f.runtime.state.model_calls, 2);
+  assert.deepEqual(f.submissions[0], f.submissions[1]);
+});
+
+test('model retry refuses changed control or identity before charging another call', async t => {
+  for (const change of ['identity', 'epoch']) {
+    const model = retryModel(['bad JSON', response]); const f = runtimeFixture(t, model.decide);
+    f.runtime.connectionReady = async () => {
+      if (change === 'epoch') f.runtime.lease.epoch++;
+      else f.runtime.state.identity = { ...f.runtime.state.identity, actor_id: 'other-ai' };
+    };
+    await assert.rejects(f.invoke(), { code: 'run_stopped' });
+    assert.equal(model.calls, 1); assert.equal(f.runtime.state.model_calls, 1); assert.equal(f.submissions.length, 0);
+  }
+});
+
+test('diary retries charge the community budget and completed diary is never regenerated', async t => {
+  const model = retryModel(['', '今天留下了一段值得记住的交流。'], { purpose: 'diary_summary', parse: parseDiary });
+  const f = runtimeFixture(t, reportedDecision(response));
+  f.runtime.preferences = { diary: {}, community: {} }; f.runtime.summarize = model.decide; f.runtime.configuration = async () => ({});
+  f.runtime.diary.record({ id: 'entry-1', occurred_at: '2026-11-01T01:00:00Z', kind: 'post_read', reaction: 'noted', reflection: '这是本机测试经历。' });
+  f.runtime.api.data = async () => ({ jobs: [{ id: 'diary-job', actor_id: 'ai-fixture', since: '2026-11-01T00:00:00Z', until: '2026-11-02T00:00:00Z', status: 'pending' }] });
+  await f.runtime.serviceDiary(); assert.equal(model.calls, 2); assert.equal(f.runtime.state.model_calls, 2);
+  assert.equal(f.submissions[0].body.status, 'completed');
+  await f.runtime.serviceDiary(); assert.equal(model.calls, 2); assert.equal(f.runtime.state.model_calls, 2);
+});
+
+test('an update waits through generation retry and observes only the completed action boundary', async t => {
+  let f, scheduled = 0;
+  const model = retryModel(['bad JSON', response], { callLogger: { start() { return { retry(entry) {
+    if (entry.status === 'scheduled') { scheduled++; f.runtime.activity.requestPause(); assert.equal(f.runtime.activity.canPark(), false); }
+  } }; } } });
+  f = runtimeFixture(t, model.decide); f.runtime.activity.start('watch');
+  await f.runtime.performAction('reply', () => f.invoke());
+  assert.equal(scheduled, 1); assert.equal(f.runtime.activity.canPark(), true); assert.equal(f.submissions.length, 1);
+});
 
 test('community submitted state correlates the original id without changing the posted body', async t => {
   const f = runtimeFixture(t, reportedDecision(response));

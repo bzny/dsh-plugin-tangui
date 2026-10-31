@@ -51,35 +51,115 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function activitySummary(state) {
-      const entry = state.modelLogs?.at(-1);
-      const runtime = state.runtime || {};
-      const purpose = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', game_reflection: '游戏计划与回想', diary_summary: '整理日记', post_draft: '起草帖子' }[entry?.purpose] || '模型调用';
-      const stage = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '模型调用失败', cancelled: '调用已停止', timed_out: '模型等待超时' }[entry?.phase] || '处理中';
-      const stageTone = { waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' }[entry?.phase] || 'blue';
-      const outcome = [runtime.last_model_call, state.lastGameModelCall].find(row => row?.call_id === entry?.call_id);
-      let result = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' }[outcome?.status];
-      let resultTone = { generating: 'blue', model_started: 'blue', model_failed: 'red', declined: 'gray', pending: 'orange', submitted: 'green', accepted: 'green', discarded: 'gray', discarded_late: 'gray', rejected: 'red' }[outcome?.status];
-      if (outcome?.status === 'submitted' && runtime.last_submission?.call_id === entry?.call_id) {
-        result = runtime.last_submission.status === 'queued' ? '已排队，尚未展示' : runtime.last_submission.status === 'published' ? '已公开发表' : '服务已接收';
-        resultTone = runtime.last_submission.status === 'queued' ? 'orange' : 'green';
-      }
-      const error = runtime.error?.message || state.runtimeConnection?.error?.message || state.error?.message || state.runtimeInitializationError || '';
-      const reconnect = reconnectSummary(runtime);
-      return {
-        runtime: runtime.stopping ? '社区正在停止' : reconnect ? [reconnect.label, reconnect.detail].filter(Boolean).join(' · ') : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
-        runtimeTone: runtime.stopping ? 'gray' : reconnect ? 'orange' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
-        model: entry ? `${purpose} · ${stage}${Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : ''}${result ? ` · ${result}` : ''}` : '尚无模型调用记录',
-        modelPrefix: entry ? `${purpose} · ` : '',
-        modelStage: entry ? stage : '',
-        modelElapsed: entry && Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : '',
-        modelResult: result,
-        stageTone,
-        resultTone,
-        attention: !!error || ['failed', 'timed_out'].includes(entry?.phase) || ['rejected'].includes(outcome?.status),
-        error,
-      };
-    }
+    // Retry and failure-sample presentation by KIMI; backend field wiring by Codex.
+const MODEL_LOG_PURPOSES = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', game_reflection: '游戏计划与回想', diary_summary: '整理日记', post_draft: '起草帖子' };
+const MODEL_LOG_PHASES = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', waiting_retry: '等待重试', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '模型等待超时' };
+const MODEL_LOG_PHASE_TONES = { waiting_response: 'orange', waiting_retry: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' };
+const MODEL_LOG_OUTCOMES = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
+const MODEL_LOG_OUTCOME_TONES = { generating: 'blue', model_started: 'blue', model_failed: 'red', declined: 'gray', pending: 'orange', submitted: 'green', accepted: 'green', discarded: 'gray', discarded_late: 'gray', rejected: 'red' };
+const MODEL_LOG_RETRY_STATUS = { scheduled: '已安排重试', exhausted: '连续尝试后未完成', cancelled: '重试已取消', stopped: '重试已停止' };
+const MODEL_LOG_VALIDATION_REASONS = { empty_output: '返回内容为空，未得到可用输出', json_syntax: 'JSON 语法错误，无法解析返回内容', object_required: '返回内容的顶层必须是 JSON 对象', missing_field: '缺少必需字段', field_type: '字段类型不符合约定', field_length: '字段长度不符合要求', unknown_field: '返回了结构定义之外的字段', empty_reply: '回复正文为空', invalid_attachment: '附件格式或内容无效', invalid_sticker: '贴纸格式或内容无效', unsupported_output: '输出类型不受支持', schema_invalid: '输出未通过结构约束校验', invalid_choice: '选择值不在允许范围内', invalid_evidence: '证据引用无效或不符合要求' };
+const MODEL_LOG_VALIDATION_FIELDS = { participate: '是否回复', body: '正文', reflection: '回想', decision_note: '参与说明', attachments: '附件', sticker_codes: '表情代码', action_id: '游戏动作', commentary: '动作说明', memory_note: '私人短记', name: '名称', overrides: '人设属性', title: '标题', topics: '话题', source_ids: '来源编号' };
+function modelLogLabel(table, value) {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(table, value) ? table[value] : '';
+}
+function modelLogAttempt(entry) {
+  const attempt = Number.isInteger(entry?.attempt) && entry.attempt >= 1 && entry.attempt <= 3 ? entry.attempt : null;
+  if (!attempt) return '';
+  const maximum = Number.isInteger(entry.max_attempts) && entry.max_attempts >= 1 && entry.max_attempts <= 3 ? entry.max_attempts : 3;
+  return `第 ${attempt} 次/最多 ${maximum} 次`;
+}
+function modelLogRetrying(entry) {
+  return entry?.phase === 'waiting_retry' || entry?.retry_status === 'scheduled';
+}
+function modelLogStage(entry) {
+  if (!entry) return '处理中';
+  const status = entry.retry_status;
+  const parts = [];
+  if (status === 'exhausted') parts.push('连续尝试后未完成');
+  else if (entry.phase === 'waiting_retry') parts.push('等待重试');
+  else if (status === 'scheduled' && ['failed', 'timed_out'].includes(entry.phase)) parts.push('本次尝试未完成，等待重试');
+  else parts.push(modelLogLabel(MODEL_LOG_PHASES, entry.phase) || (entry.phase ? '处理中（阶段类型未识别）' : '处理中'));
+  if (status === 'scheduled' && entry.phase !== 'waiting_retry' && !['failed', 'timed_out'].includes(entry.phase)) parts.push('已安排重试');
+  if (['cancelled', 'stopped'].includes(status) && entry.phase !== 'cancelled') parts.push(modelLogLabel(MODEL_LOG_RETRY_STATUS, status));
+  if (status && !modelLogLabel(MODEL_LOG_RETRY_STATUS, status)) parts.push('重试状态未识别');
+  const attempt = modelLogAttempt(entry);
+  if (attempt) parts.push(attempt);
+  return parts.join(' · ');
+}
+function modelLogStageTone(entry) {
+  if (modelLogRetrying(entry)) return 'orange';
+  if (entry?.retry_status === 'exhausted') return 'red';
+  if (['cancelled', 'stopped'].includes(entry?.retry_status)) return 'gray';
+  return modelLogLabel(MODEL_LOG_PHASE_TONES, entry?.phase) || 'blue';
+}
+function modelLogUuid(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null;
+}
+function modelLogValidation(entry) {
+  if (!entry?.validation_reason && entry?.validation_field == null) return '';
+  const parts = [];
+  if (entry.validation_reason) parts.push(`校验分类：${modelLogLabel(MODEL_LOG_VALIDATION_REASONS, entry.validation_reason) || '返回内容未通过校验，校验分类未识别'}。`);
+  if (entry.validation_field !== null && entry.validation_field !== undefined) {
+    const field = modelLogLabel(MODEL_LOG_VALIDATION_FIELDS, entry.validation_field);
+    parts.push(field ? `校验字段：${field}（${entry.validation_field}）。` : '校验字段：未识别字段，未显示原值。');
+  }
+  return parts.join(' ');
+}
+function modelLogFailureSamplesCard(state, action, busy) {
+  const samples = state.failureSamples;
+  if (!samples || typeof samples !== 'object') return null;
+  const enabled = samples.enabled === true;
+  const directory = typeof samples.directory === 'string' && samples.directory ? samples.directory : '未提供';
+  const count = Number.isFinite(samples.count) && samples.count >= 0 ? samples.count : 0;
+  const maxCount = Number.isFinite(samples.max_count) && samples.max_count >= 0 ? samples.max_count : 20;
+  const maxAgeDays = Number.isFinite(samples.max_age_days) && samples.max_age_days >= 0 ? samples.max_age_days : 7;
+  const maxBytes = Number.isFinite(samples.max_bytes) && samples.max_bytes >= 0 ? samples.max_bytes : 262144;
+  const maxKilobytes = Math.round(maxBytes / 1024);
+  return h('div', { style: { margin: '12px 0', padding: '10px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '8px' } },
+    h('strong', null, '失败样本（仅本机）'),
+    h('p', { style: { margin: '6px 0', fontSize: '14px' } }, h('span', { className: `tangui-status-${enabled ? 'green' : 'gray'}` }, enabled ? '已启用' : '未启用'), typeof action === 'function' ? '' : ' · 只读'),
+    typeof action === 'function' ? h('label', { style: { display: 'block', margin: '6px 0', fontSize: '14px' } },
+      h('input', { type: 'checkbox', checked: enabled, disabled: !!busy, onChange: event => { if (!busy) action({ action: 'model_failure_samples', enabled: !!event.target.checked }); } }), ' 在本机保存失败样本') : null,
+    h('p', { style: { margin: '6px 0', fontSize: '14px' } }, '失败样本只在本机保留模型最终返回文本，不保存思考过程或提示词，不自动上传。样本可能包含人设或交流内容，请按敏感内容对待。这里仅显示目录和文件编号，不展示样本原文。'),
+    h('p', { style: { margin: '6px 0', fontSize: '14px' } }, `保存策略：每条最多 ${maxKilobytes} KB，只保留最近 ${maxCount} 条，最长保留 ${maxAgeDays} 天。当前样本数：${count}。`),
+    h('p', { style: { margin: '6px 0', fontSize: '14px', overflowWrap: 'anywhere' } }, `样本目录：${directory}`),
+    samples.storage_error ? h('p', { className: 'tangui-status-red', style: { margin: '6px 0', fontSize: '14px' } }, '本机样本存储发生错误，样本可能未保存。') : null);
+}
+function activitySummary(state) {
+  const entry = state.modelLogs?.at(-1);
+  const runtime = state.runtime || {};
+  const purpose = modelLogLabel(MODEL_LOG_PURPOSES, entry?.purpose) || '模型调用';
+  const retrying = modelLogRetrying(entry);
+  const stage = modelLogStage(entry);
+  const stageTone = modelLogStageTone(entry);
+  const outcome = [runtime.last_model_call, state.lastGameModelCall].find(row => row?.call_id === entry?.call_id);
+  let result = modelLogLabel(MODEL_LOG_OUTCOMES, outcome?.status) || undefined;
+  let resultTone = modelLogLabel(MODEL_LOG_OUTCOME_TONES, outcome?.status) || undefined;
+  if (retrying && outcome?.status === 'model_failed') {
+    result = undefined;
+    resultTone = undefined;
+  }
+  if (outcome?.status === 'submitted' && runtime.last_submission?.call_id === entry?.call_id) {
+    result = runtime.last_submission.status === 'queued' ? '已排队，尚未展示' : runtime.last_submission.status === 'published' ? '已公开发表' : '服务已接收';
+    resultTone = runtime.last_submission.status === 'queued' ? 'orange' : 'green';
+  }
+  const error = runtime.error?.message || state.runtimeConnection?.error?.message || state.error?.message || state.runtimeInitializationError || '';
+  const reconnect = reconnectSummary(runtime);
+  return {
+    runtime: runtime.stopping ? '社区正在停止' : reconnect ? [reconnect.label, reconnect.detail].filter(Boolean).join(' · ') : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
+    runtimeTone: runtime.stopping ? 'gray' : reconnect ? 'orange' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
+    model: entry ? `${purpose} · ${stage}${Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : ''}${result ? ` · ${result}` : ''}` : '尚无模型调用记录',
+    modelPrefix: entry ? `${purpose} · ` : '',
+    modelStage: entry ? stage : '',
+    modelElapsed: entry && Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : '',
+    modelResult: result,
+    stageTone,
+    resultTone,
+    attention: !!error || entry?.retry_status === 'exhausted' || (!retrying && ['failed', 'timed_out'].includes(entry?.phase)) || ['rejected'].includes(outcome?.status),
+    error,
+  };
+}
 
     // Draft reminder presentation supplied by KIMI; runtime data wiring by Codex.
 function DraftReviewReminder({source}) {
@@ -986,29 +1066,37 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
       );
     }
 
-    function ModelCallsPanel({ state }) {
-      const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
-      const purposes = { community_reply: '社区回应', persona_normalization: '整理人设', game_decision: '游戏决策', game_reflection: '游戏计划与回想', diary_summary: '整理日记', post_draft: '起草帖子' };
-      const phases = { preparing: '准备请求', waiting_response: '等待模型响应', receiving: '正在接收输出', parsing: '检查返回格式', completed: '模型生成完成', failed: '调用失败', cancelled: '已停止', timed_out: '等待超时' };
-      const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
-      const outcomeLabels = { generating: '生成中', model_started: '生成中', model_failed: '生成失败', declined: '决定不回复', pending: '待提交或等待确认', submitted: '服务已接收，发表状态见运行记录', accepted: '服务已接收', discarded: '未提交', discarded_late: '未提交', rejected: '服务未接受' };
-      const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化', content_unavailable: '内容已撤回或不可访问，停止追发' };
-      const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
-      return h('details', { className: 'tangui-session-status', style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
-        h('style', null, SESSION_STATUS_CSS),
-        h('summary', null, '模型调用日志', logs.length ? ` · 最近 ${logs.length} 条阶段记录` : ' · 尚无调用记录'),
-        h('p', { style: { fontSize: '14px' } }, '社区回应、人设整理和游戏决策都记录阶段与用量。模型生成完成不代表已发表或已执行游戏动作。完整日志保存在本机 model-logs 目录；不记录提示词、正文、思考原文或密钥。'),
-        ...outcomes.map(outcome => h('p', { key: outcome.call_id, style: { fontSize: '14px', overflowWrap: 'anywhere' } },
-          `调用 ${outcome.call_id} 的处理结果：`, h('span', { className: `tangui-status-${outcome.reason === 'expired' ? 'red' : outcome.status === 'submitted' && state.runtime?.last_submission?.call_id === outcome.call_id && state.runtime?.last_submission?.status === 'queued' ? 'orange' : ({ generating: 'blue', model_started: 'blue', model_failed: 'red', declined: 'gray', pending: 'orange', submitted: 'green', accepted: 'green', discarded: 'gray', discarded_late: 'gray', rejected: 'red' })[outcome.status] || 'gray'}` }, `${outcomeLabels[outcome.status] || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`))),
-        ...logs.map((entry, index) => h('div', { key: `${entry.call_id}-${entry.time}-${index}`, style: { borderTop: '1px solid var(--dsw-alias-border-l2, #aaa)', padding: '10px 0' } },
-          h('strong', null, `${purposes[entry.purpose] || '模型调用'} · `, h('span', { className: `tangui-status-${({ waiting_response: 'orange', completed: 'green', failed: 'red', timed_out: 'red', cancelled: 'gray' })[entry.phase] || 'blue'}` }, phases[entry.phase] || '处理中')),
-          h('small', { style: { display: 'block', overflowWrap: 'anywhere' } }, `调用编号：${entry.call_id || '未知'}`),
-          h('p', { style: { margin: '5px 0' } }, `${new Date(entry.time).toLocaleTimeString()} · ${entry.model || '未选择模型'} · 已用 ${seconds(entry.elapsed_ms)} · 本次等待上限 ${seconds(entry.timeout_ms)}`),
-          entry.deadline_remaining_ms !== null && entry.deadline_remaining_ms !== undefined && h('p', null, `开始调用时，本回合还剩 ${seconds(entry.deadline_remaining_ms)}`),
-          entry.first_output_ms !== null && entry.first_output_ms !== undefined && h('p', null, `首次收到正文或思考：${seconds(entry.first_output_ms)}`),
-          entry.event === 'finished' && h('p', null, `输出额度 ${entry.max_tokens ?? '未知'} token · 已用 ${entry.output_tokens ?? '服务未提供'} token · 正文 ${entry.text_characters ?? '未知'} 字符 · 思考 ${entry.reasoning_characters ?? '未知'} 字符`),
-          entry.error_code && h('p', { style: { color: '#d54949' } }, `诊断代码：${entry.error_code}`))));
-    }
+function ModelCallsPanel({ state, action, busy }) {
+  const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
+  const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
+  const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化', content_unavailable: '内容已撤回或不可访问，停止追发' };
+  const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
+  return h('details', { className: 'tangui-session-status', style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
+    h('style', null, SESSION_STATUS_CSS),
+    h('summary', null, '模型调用日志', logs.length ? ` · 最近 ${logs.length} 条阶段记录` : ' · 尚无调用记录'),
+    h('p', { style: { fontSize: '14px' } }, '社区回应、人设整理和游戏决策都记录阶段与用量。模型生成完成不代表已发表或已执行游戏动作。完整日志保存在本机 model-logs 目录；常规日志不记录提示词、正文、思考原文或密钥。校验分类说明返回文本未通过检查的原因，校验字段只展示内置已知字段名。'),
+    modelLogFailureSamplesCard(state, action, busy),
+    ...outcomes.map(outcome => h('p', { key: outcome.call_id, style: { fontSize: '14px', overflowWrap: 'anywhere' } },
+      `调用 ${outcome.call_id} 的处理结果：`, h('span', { className: `tangui-status-${outcome.reason === 'expired' ? 'red' : outcome.status === 'submitted' && state.runtime?.last_submission?.call_id === outcome.call_id && state.runtime?.last_submission?.status === 'queued' ? 'orange' : modelLogLabel(MODEL_LOG_OUTCOME_TONES, outcome.status) || 'gray'}` }, `${outcome.status === 'submitted' ? '服务已接收，发表状态见运行记录' : modelLogLabel(MODEL_LOG_OUTCOMES, outcome.status) || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`))),
+    ...logs.map((entry, index) => {
+      const validation = modelLogValidation(entry);
+      const retryGroup = modelLogUuid(entry.retry_group_id);
+      const sampleId = modelLogUuid(entry.failure_sample_id);
+      return h('div', { key: `${entry.call_id}-${entry.time}-${index}`, style: { borderTop: '1px solid var(--dsw-alias-border-l2, #aaa)', padding: '10px 0' } },
+        h('strong', null, `${modelLogLabel(MODEL_LOG_PURPOSES, entry.purpose) || '模型调用'} · `, h('span', { className: `tangui-status-${modelLogStageTone(entry)}` }, modelLogStage(entry))),
+        h('small', { style: { display: 'block', overflowWrap: 'anywhere' } }, `调用编号：${entry.call_id || '未知'}`),
+        retryGroup && h('small', { style: { display: 'block', overflowWrap: 'anywhere' } }, `重试组编号：${retryGroup}`),
+        h('p', { style: { margin: '5px 0' } }, `${new Date(entry.time).toLocaleTimeString()} · ${entry.model || '未选择模型'} · 已用 ${seconds(entry.elapsed_ms)} · 本次等待上限 ${seconds(entry.timeout_ms)}`),
+        entry.retry_status === 'scheduled' && Number.isFinite(entry.retry_after_ms) && entry.retry_after_ms >= 0 && h('p', null, `距离下一次尝试的等待时间：${seconds(entry.retry_after_ms)}`),
+        entry.deadline_remaining_ms !== null && entry.deadline_remaining_ms !== undefined && h('p', null, `开始调用时，本回合还剩 ${seconds(entry.deadline_remaining_ms)}`),
+        entry.first_output_ms !== null && entry.first_output_ms !== undefined && h('p', null, `首次收到正文或思考：${seconds(entry.first_output_ms)}`),
+        entry.event === 'finished' && h('p', null, `输出额度 ${entry.max_tokens ?? '未知'} token · 已用 ${entry.output_tokens ?? '服务未提供'} token · 正文 ${entry.text_characters ?? '未知'} 字符 · 思考 ${entry.reasoning_characters ?? '未知'} 字符`),
+        validation && h('p', { className: 'tangui-status-orange', style: { margin: '5px 0' } }, validation),
+        sampleId && h('p', { style: { margin: '5px 0', overflowWrap: 'anywhere' } }, `失败样本文件编号：${sampleId}（仅文件编号）`),
+        entry.failure_sample_id !== null && entry.failure_sample_id !== undefined && !sampleId && h('p', { style: { margin: '5px 0' } }, '失败样本文件编号：未提供有效编号'),
+        entry.error_code && h('p', { style: { color: '#d54949' } }, `诊断代码：${entry.error_code}`));
+    }));
+}
 
     function RuntimePanel({ state, action, busy }) {
       busy = busy || state.updates?.state === 'installing';
@@ -1246,7 +1334,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
         state.warning && h('p', { role: 'status' }, state.warning),
         h(UpdatePanel, { update: state.updates, action, busy }),
         h(RuntimePanel, { key: draftKey('post', state), state, action, busy }),
-        h(ModelCallsPanel, { state }),
+        h(ModelCallsPanel, { state, action, busy }),
         field('社区地址', form.platformUrl, (value) => edit((old) => ({ ...old, platformUrl: value }))),
         !supportsConnectionSwitch && h('p', { role: 'status' }, 'DSH 服务尚未加载本次插件更新，请结束当前任务后通过原有启动器重新启动 DSH，再更换社区。仅刷新页面不会更新服务程序。'),
         field('长期记忆目录（自动识别，也可调整）', form.memoryDir, (value) => edit((old) => ({ ...old, memoryDir: value }))),
