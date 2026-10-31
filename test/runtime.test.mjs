@@ -9,6 +9,7 @@ import { RuntimeConnection } from '../lib/runtime-connection.js';
 import { parseDecision, createRuntimeModel } from '../lib/runtime-model.js';
 import { registerRuntimeTool } from '../lib/runtime-tool.js';
 import { atomicState } from '../lib/runtime-api.js';
+import { GameRuntime } from '../lib/game-runtime.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
 const scopes = ['posts:read', 'comments:write', 'events:read'];
@@ -18,7 +19,7 @@ async function until(check) { for (let i = 0; i < 200; i++) { if (check()) retur
 
 function fixture(t, options = {}) {
   const directory = join(ROOT, `runtime-${randomUUID()}`); mkdirSync(directory, { recursive: true });
-  const binding = { baseUrl: 'http://127.0.0.1:4999', actorId: 'ai-test', actorName: '测试伙伴', grantId: 'grant-test', token: 'FAKE_RUNTIME_TOKEN', scopes: [...scopes, ...(options.posts ? ['posts:write'] : [])] };
+  const binding = { baseUrl: options.baseUrl || 'http://127.0.0.1:4999', actorId: 'ai-test', actorName: '测试伙伴', grantId: 'grant-test', token: 'FAKE_RUNTIME_TOKEN', scopes: [...scopes, ...(options.posts ? ['posts:write'] : []), ...(options.games ? ['games:play'] : [])] };
   const actor = { id: 'ai-test', name: '测试伙伴', kind: 'ai', relationship: 'companion', linked_human_id: 'human-test' };
   const post = { id: 'post-test', title: '游戏讨论', body: '你喜欢什么游戏？', author: { id: 'human-test', kind: 'human', name: '测试人类' }, content: [{ type: 'image', url: 'PRIVATE_MEDIA_URL' }, { type: 'text', text: '公开文字' }], extensions: { secret: 'DO_NOT_SEND_MODEL' } };
   const remote = { calls: [], modelInputs: [], modelCalls: 0, comments: [], events: [], imports: new Map(), submissions: [], renews: 0, held: null, loseReply: false,
@@ -48,6 +49,10 @@ function fixture(t, options = {}) {
       assert.equal(remote.held, body.instance_id); remote.presence.push(body); return send({ saved: true });
     }
     if (path === '/api/v1/agent/configuration') return send({ actor, persona, private: 'DO_NOT_SEND_MODEL' });
+    if (options.games && path === '/api/v1/agent/game-autoplay') return send({ session: null });
+    if (options.games && path === '/api/v1/game-matchmaking') return send({ tickets: [] });
+    if (options.games && path === '/api/v1/agent/game-assignment') return send({ room: null });
+    if (options.games && path === '/api/v1/agent/game-invitations') return send({ invitations: [], auto_accept: false });
     if (path === '/api/v1/agent/preferences' && options.posts) return send({ community: { auto_post: false, paused: false, configured: false, quiet_now: false }, diary: {} });
     if (path === '/api/v1/agent/diary-jobs' && options.posts) return send({ jobs: [] });
     if (path === '/api/v1/agent/post-drafts' && options.posts) {
@@ -98,7 +103,9 @@ function fixture(t, options = {}) {
     return options.decide ? options.decide(context, signal, onDiagnostic) : { participate: true, body: '我喜欢共同交流的游戏。' };
   };
   const connection = { binding: () => binding };
-  const make = () => new CommunityRuntime({ directory, connection, decide: model, fetchImpl, presenceMs: 20 });
+  const make = () => new CommunityRuntime({ directory, connection, decide: model, fetchImpl, presenceMs: 20,
+    gameRuntime: options.games ? new GameRuntime({ stateFile: join(directory, 'games.json'), bridge: { state: {} },
+      fetchImpl, decide: async () => { assert.fail('No game decision expected'); }, automatic: false }) : undefined });
   const runtime = make();
   t.after(async () => { runtime.stop(); await runtime.settled(); assert.ok(resolve(directory).startsWith(ROOT)); rmSync(directory, { recursive: true }); });
   return { runtime, make, binding, remote, directory, fetchImpl };
@@ -112,6 +119,31 @@ test('single reads public context, counts one queued reply, reports presence and
   assert.doesNotMatch(JSON.stringify(f.remote.modelInputs), /FAKE_RUNTIME_TOKEN|DO_NOT_SEND_MODEL|PRIVATE_MEDIA_URL/);
   assert.equal(f.remote.modelInputs[0].self.linked_human_id, 'human-test');
   assert.equal(f.remote.modelInputs[0].comments_page.has_more, true);
+});
+
+test('old game identity no longer stops community observation after an origin or account switch', async t => {
+  for (const actorId of ['ai-test', 'previous-ai']) await t.test(actorId, async child => {
+    const f = fixture(child, { games: true, baseUrl: 'https://csiparty.natapp1.cc' });
+    const game = f.runtime.gameRuntime;
+    game.state.identity = { baseUrl: 'https://test.csiparty.cn', actorId };
+    game.state.journals['historical-room'] = { modelCalls: 4, requests: {} };
+    if (actorId !== 'ai-test') game.state.lastFinishedRoom = 'historical-room';
+    game.save();
+    f.runtime.start({ mode: 'single' }); await f.runtime.settled();
+    assert.equal(f.runtime.publicStatus().error, null);
+    assert.equal(f.remote.modelCalls, 1); assert.equal(f.remote.submissions.length, 1);
+    assert.equal(f.remote.acquired, 1); assert.equal(f.remote.released, 1);
+    assert.equal(game.state.identity.actorId, 'ai-test');
+    if (actorId === 'ai-test') assert.equal(game.state.journals['historical-room'].modelCalls, 4);
+    else {
+      assert.equal(game.state.journals['historical-room'], undefined);
+      assert.equal(game.state.lastFinishedRoom, undefined, 'old partner reflections cannot enter the new lifecycle');
+    }
+    const restarted = f.make(); restarted.start({ mode: 'single' }); await restarted.settled();
+    assert.equal(restarted.publicStatus().error, null);
+    assert.equal(f.remote.modelCalls, 1, 'already read content must not regenerate a reply');
+    assert.equal(f.remote.submissions.length, 1);
+  });
 });
 
 test('withdrawn post is retired before model reading without retries', async t => {

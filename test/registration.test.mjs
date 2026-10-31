@@ -433,12 +433,11 @@ test('community origins accept remote HTTPS and local HTTP but reject credential
   }
 });
 
-test('a fresh installation requires an explicit community address and preserves existing bindings on upgrade', async (t) => {
+test('a fresh installation defaults to the official entry and preserves other existing bindings on upgrade', async (t) => {
   const f = await fixture(t);
   const fresh = new RegistrationBridge({ ...f.options, stateFile: join(f.memoryDir, 'fresh-state.json'), baseUrl: '' });
-  assert.equal(fresh.publicStatus().platformUrl, '');
+  assert.equal(fresh.publicStatus().platformUrl, 'https://csiparty.natapp1.cc');
   await fresh.configure({ enabled: false, memoryDir: f.memoryDir });
-  await assert.rejects(() => fresh.prepare(), { code: 'invalid_platform' });
   assert.equal(f.calls.length, 0);
   await connect(f);
   const existing = new RegistrationBridge({ ...f.options, baseUrl: '' });
