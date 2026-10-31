@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tangui",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "碳硅派对官方 DSH 接入：注册绑定、人设同步与社区互动。",
   "type": "module",
   "main": "lib/index.js",

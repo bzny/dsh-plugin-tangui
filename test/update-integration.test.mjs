@@ -80,6 +80,7 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
   try {
     const first = setupUpdates(make(firstDisposers), { stateFile: join(root, 'state.json'), isBusy: () => false }); first.ready();
     const coordinator = shared.get(key), oldManager = coordinator.manager;
+    coordinator.persist = () => {}; // Simulate the legacy writer retained by HMR.
     // An in-flight updater from before manual installation had neither method.
     oldManager.canInstall = undefined; oldManager.install = undefined;
     let finish;
@@ -97,6 +98,9 @@ test('HMR waits for the old update, retains the gate, then adopts new updater co
     assert.equal(next.status().state, 'updated');
     release(); assert.equal(next.gate.locked, false);
     next.setAuto(false); assert.equal(next.status().auto, false);
+    coordinator.continuation = { version: 1, options: { mode: 'watch' } };
+    coordinator.resumeState = 'pending'; coordinator.persist(coordinator.manager.status());
+    assert.equal(JSON.parse(readFileSync(join(root, 'plugin-update.json'), 'utf8')).continuation.options.mode, 'watch');
   } finally {
     nextDisposers.forEach(dispose => dispose()); shared.delete(key);
     assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });

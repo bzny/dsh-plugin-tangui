@@ -168,14 +168,15 @@ test('manual install rejects stale targets and concurrent clicks without duplica
   await first; assert.equal(host.calls.filter(x => x === 'install').length, 1);
 });
 
-test('manual install respects active tasks and does not silently queue while auto is off', async () => {
+test('an explicitly requested manual update waits for the current action even while auto is off', async () => {
   let busy = true; const host = hostFixture({ tryAcquireIdleLock() { return busy ? null : () => {}; } });
   const m = manager({ ...fixture(), host: host.host, auto: false });
   await m.check({ install: false, manual: true });
   assert.equal((await m.install({ version: '0.4.1', commit })).state, 'waiting_idle');
   assert.equal(host.calls.length, 0); busy = false;
-  await m.tick(); assert.equal(host.calls.length, 0);
-  assert.equal((await m.install({ version: '0.4.1', commit })).state, 'updated');
+  assert.equal((await m.tick()).state, 'updated');
+  assert.ok(host.calls.length > 0); assert.equal(m.auto, false);
+  const count = host.calls.length; await m.tick(); assert.equal(host.calls.length, count);
 });
 
 test('manual entry keeps development, unsupported-host and restart conditions intact', async () => {

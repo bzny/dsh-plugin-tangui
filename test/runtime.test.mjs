@@ -175,6 +175,54 @@ test('stop during a model call never submits the late result', async t => {
   assert.equal(f.remote.submissions.length, 0); assert.equal(f.runtime.publicStatus().state, 'stopped'); assert.equal(f.remote.released, 1);
 });
 
+test('an update waits for one reply, wakes a long observation interval and restores exact limits without reposting', async t => {
+  let finish;
+  const f = fixture(t, { decide: () => new Promise(resolve => { finish = resolve; }) });
+  const options = { mode: 'watch', interval_seconds: 3600, max_model_calls: 17, max_replies: 13, max_posts: 4, interest_threshold: 0.6, query: '公开游戏' };
+  f.runtime.start(options); await until(() => !!finish);
+  f.runtime.requestUpdatePause();
+  assert.equal(f.runtime.busyForUpdate(), true);
+  assert.equal(f.runtime.abort.signal.aborted, false);
+  assert.deepEqual(f.runtime.publicStatus().activity.actions.map(a => a.type), ['reply']);
+  finish({ participate: true, body: '这次回复在更新前完成。' });
+  await until(() => f.runtime.updateParked);
+  assert.equal(f.remote.submissions.length, 1); assert.equal(f.runtime.busyForUpdate(), false);
+  const saved = f.runtime.updateContinuation();
+  assert.deepEqual(saved.options, options); assert.doesNotMatch(JSON.stringify(saved), /FAKE_RUNTIME_TOKEN|这次回复/);
+  f.runtime.stop('host_stopped'); await f.runtime.settled();
+  const next = f.make();
+  try {
+    next.resumeAfterUpdate(saved); await until(() => next.detail === 'waiting');
+    assert.equal(next.running(), true); assert.equal(next.mode, 'watch');
+    assert.equal(next.pollInterval, 3600000); assert.equal(next.state.model_calls, 1); assert.equal(next.state.replies, 1);
+    assert.deepEqual(next.limits, { max_model_calls: 17, max_replies: 13, max_posts: 4 });
+    assert.equal(f.remote.submissions.length, 1); assert.equal(f.remote.modelCalls, 1);
+    next.requestUpdatePause(); await until(() => next.updateParked);
+    assert.equal(next.busyForUpdate(), false);
+  } finally { next.stop(); await next.settled(); }
+});
+
+test('manual stop while an update is waiting wins and leaves no resumable intention', async t => {
+  const f = fixture(t); f.runtime.start({ mode: 'watch', interval_seconds: 3600 });
+  await until(() => f.runtime.detail === 'waiting'); f.runtime.requestUpdatePause();
+  await until(() => f.runtime.updateParked);
+  let cancelled = 0; f.runtime.onUpdateCancelled = () => { cancelled++; };
+  f.runtime.stop(); await f.runtime.settled();
+  assert.equal(cancelled, 1); assert.equal(f.runtime.updateContinuation(), null);
+  assert.equal(f.remote.submissions.length, 1);
+});
+
+test('cancelled update continues the same watcher and changed identity cannot consume a saved continuation', async t => {
+  const f = fixture(t); f.runtime.start({ mode: 'watch', interval_seconds: 3600 });
+  await until(() => f.runtime.detail === 'waiting'); f.runtime.requestUpdatePause(); await until(() => f.runtime.updateParked);
+  const saved = f.runtime.updateContinuation(), instance = f.runtime.instanceId;
+  f.runtime.cancelUpdatePause(); await until(() => !f.runtime.updateParked && f.runtime.detail === 'waiting');
+  assert.equal(f.runtime.instanceId, instance); assert.equal(f.remote.acquired, 1);
+  f.runtime.stop(); await f.runtime.settled(); f.binding.grantId = 'different-grant';
+  assert.throws(() => f.make().resumeAfterUpdate(saved), { code: 'update_resume_identity_changed' });
+  assert.equal(f.remote.acquired, 1);
+});
+
 test('control renewal continues while thinking and renewal failure stops a late model result', async t => {
   let finish; const f = fixture(t, { fastRenew: true, decide: () => new Promise(resolve => { finish = resolve; }) });
   f.runtime.start(); await until(() => f.remote.renews > 0); f.remote.renewFail = true;

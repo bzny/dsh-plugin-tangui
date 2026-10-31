@@ -773,13 +773,12 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
       } else if (state === 'checking') {
         primary = '正在检查 GitHub 正式版本。';
       } else if (state === 'waiting_idle') {
-        primary = !autoInstallEntry ? capabilityNote || '当前只能检查版本，尚未获得安装能力。' : update.auto === true
-          ? '更新已准备好，任务结束后会自动安装。'
-          : '请先结束任务或保存编辑，再点击“立即更新”；自动更新已关闭。';
+        primary = !autoInstallEntry ? capabilityNote || '当前只能检查版本，尚未获得安装能力。'
+          : '更新已准备好，当前动作或本局游戏结束后会自动安装；无需关闭持续观察。更新后继续原活动和未完成的复盘，正在编辑的设置请先保存。';
       } else if (busy) {
         primary = '当前操作尚未结束，请完成操作或保存编辑后再更新。';
       } else if (reason === 'runtime_busy') {
-        primary = '当前有任务运行，更新会等待任务结束。';
+        primary = '等待当前动作或本局游戏结束，随后更新并继续原活动。';
       } else if (reason === 'update_busy') {
         primary = '另一项更新操作正在进行，请等待其完成。';
       } else if (
@@ -842,7 +841,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
         current: update.lastCheck ? '暂无新版' : '等待检查',
         checking: '正在检查',
         available: '发现新版本',
-        waiting_idle: '等待任务结束',
+        waiting_idle: '等待当前动作结束',
         installing: '正在安装',
         restarting_needed: '等待重启',
         updated: '更新流程完成',
@@ -856,8 +855,10 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
 
       var autoDescription = '每小时自动检查 GitHub 正式版本；北京时间 01:00–07:00 暂停自动检查，可随时手动检查。';
       if (autoInstallEntry) {
-        autoDescription += ' 此入口可安装时，会等待任务结束再更新；不重启整个 DSH，保留绑定、人设、授权和预算。';
+        autoDescription += ' 等当前动作或本局游戏结束后更新，再继续原活动；持续观察不会一直阻挡更新。保留绑定、人设、授权、预算和待处理进度。';
       }
+      if (update.resumeState === 'resumed') primary += ' 已接续更新前的活动，当前运行情况见伙伴状态。';
+      if (update.resumeState === 'failed') primary += ' 原活动未自动恢复，请检查伙伴连接和运行状态后手动继续；已保存的进度保留。';
 
       return h(
         'details',
@@ -966,7 +967,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
                 }
               }),
               ' ',
-              autoInstallEntry ? '自动检查并在任务结束后更新' : '自动检查新版本'
+              autoInstallEntry ? '自动检查并在当前动作结束后更新' : '自动检查新版本'
             )
           ),
           h('p', null, autoDescription),
@@ -1042,9 +1043,9 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
       };
       const active = runtime.running || runtime.stopping;
       const reconnect = reconnectSummary(runtime);
-      const label = runtime.stopping ? '正在停止' : reconnect?.label || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
+      const label = runtime.stopping ? '正在停止' : runtime.detail === 'plugin_updating' ? '更新间暂歇' : reconnect?.label || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
       const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
-        writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', planning_game: '正在考虑本次游戏活动', reflecting_game: '正在写本场私人回想', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
+        plugin_updating: '当前动作已结束，更新完成后继续原活动', writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', planning_game: '正在考虑本次游戏活动', reflecting_game: '正在写本场私人回想', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
         content_unavailable: '内容已撤回或不可访问，已跳过',
         video_disabled: '当前图文版暂不读取视频，已跳过',

@@ -252,7 +252,8 @@ test('older service and missing candidates never offer an enabled new action', a
 
 test('busy installation tells manual and automatic users the correct next step', async () => {
   const manual = await renderUpdatePanel({ state: 'waiting_idle', reason: 'runtime_busy', auto: false });
-  assert.match(visibleText(manual.tree), /再.*点击|再次.*更新/);
+  assert.match(visibleText(manual.tree), /当前动作.*自动安装/);
+  assert.match(visibleText(manual.tree), /无需关闭持续观察/);
   const automatic = await renderUpdatePanel({ state: 'waiting_idle', reason: 'runtime_busy', auto: true });
   assert.match(visibleText(automatic.tree), /自动更新|自动安装/);
 });

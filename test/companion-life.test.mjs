@@ -178,6 +178,17 @@ test('ordinary game experience works while matchmaking is disabled', async t => 
   f.r.features = { game_experience: true, game_matchmaking: false };
   await serviceGameLife(f.r); assert.equal(f.remote.models.length, 1); assert.equal(f.remote.models[0].phase, 'reflection');
 });
+
+test('pending update does not plan the next game before the local final snapshot arrives', async t => {
+  const f = fixture(t); f.finish();
+  f.r.updateRequested = true; f.r.gameInProgress = () => true;
+  const waiting = await serviceGameLife(f.r);
+  assert.equal(waiting.active, true); assert.equal(f.remote.models.length, 0);
+  assert.equal(f.remote.calls.some(row => row.path.endsWith('/decision')), false);
+  f.r.gameInProgress = () => false;
+  await serviceGameLife(f.r);
+  assert.equal(f.remote.models.length, 1);
+});
 test('local autoplay stop cancels only waiting tickets and persists the pause across restart', async t => {
   const f = fixture(t); await serviceGameLife(f.r);
   f.remote.tickets = ['queued', 'preparing', 'playing'].map(status => ({ id: `ticket-${status}`, status, autoplay_session_id: 'session-fixture', members: [{ actor_id: 'fixture-ai' }] }));
