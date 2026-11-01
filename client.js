@@ -553,9 +553,358 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
     }, h('span', { 'aria-hidden': 'true' }, '💭 '), open ? '收起伙伴想法' : '查看伙伴想法'));
 }
 
+// Companion-life layout designed by KIMI k3.1-pro; API/state integration by Codex.
+const COMPANION_LIFE_CSS = `
+.tangui-life-panel{font-size:15px;line-height:1.65;margin:16px 0;padding:16px;border:1px solid var(--dsw-alias-border-l2,#aaa);border-radius:14px;background:linear-gradient(135deg,var(--dsw-alias-bg-layer-1,transparent),rgba(91,168,157,.07));color:inherit;overflow-wrap:anywhere}
+.tangui-life-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.tangui-life-head h3{margin:0;font-size:18px;flex:1;min-width:130px}
+.tangui-life-icon{font-size:20px}.tangui-life-badge{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(91,168,157,.13);font-size:13px;white-space:nowrap}
+.tangui-life-badge-attention{background:rgba(132,112,190,.15)}.tangui-life-summary{font-size:16px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.tangui-life-muted{opacity:.72}.tangui-life-note{font-size:14px;margin:8px 0}.tangui-life-card{margin:12px 0;padding:12px 14px;border:1px solid rgba(112,125,180,.42);border-radius:11px;background:rgba(132,112,190,.06)}
+.tangui-life-card h4{margin:0 0 6px}.tangui-life-rest{border-color:rgba(91,168,157,.45);background:rgba(91,168,157,.07)}
+.tangui-life-panel details{margin:10px 0}.tangui-life-panel summary{cursor:pointer;min-height:40px;padding:8px 2px;box-sizing:border-box;font-weight:600}
+.tangui-life-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px;margin:8px 0}.tangui-life-cell{padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.06))}
+.tangui-life-list{margin:6px 0;padding-left:22px}.tangui-life-event{padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))}
+.tangui-life-event p{margin:5px 0;white-space:pre-wrap;overflow-wrap:anywhere}.tangui-life-meta{font-size:13px;opacity:.72}
+.tangui-life-panel button{font:inherit;min-height:40px;padding:7px 13px;margin:4px 8px 4px 0;border:1px solid var(--dsw-alias-border-l2,#888);border-radius:8px;background:var(--dsw-alias-bg-layer-2,transparent);color:inherit;cursor:pointer}
+.tangui-life-panel button:disabled,.tangui-life-panel input:disabled,.tangui-life-panel select:disabled,.tangui-life-panel textarea:disabled{cursor:not-allowed;opacity:.58}
+.tangui-life-panel button:focus-visible,.tangui-life-panel summary:focus-visible,.tangui-life-panel input:focus-visible,.tangui-life-panel select:focus-visible,.tangui-life-panel textarea:focus-visible{outline:3px solid rgba(91,145,190,.55);outline-offset:2px}
+.tangui-life-field{display:block;max-width:560px;margin:10px 0}.tangui-life-field>span{display:block;margin-bottom:4px}
+.tangui-life-panel input:not([type=checkbox]),.tangui-life-panel select,.tangui-life-panel textarea{box-sizing:border-box;width:100%;max-width:560px;min-height:40px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#aaa);border-radius:8px;background:var(--dsw-alias-bg-layer-1,transparent);color:inherit;font:inherit}
+.tangui-life-panel textarea{min-height:88px;resize:vertical}.tangui-life-check{display:flex;align-items:flex-start;gap:8px;min-height:40px;padding:6px 0;cursor:pointer}.tangui-life-check input{width:18px;height:18px;flex:none;margin-top:4px}
+.tangui-life-error{color:#c84646}.tangui-life-feedback{min-height:24px;margin:8px 0}.tangui-life-evidence{font-size:14px}.tangui-life-session{display:flex;align-items:center;gap:8px;min-height:40px;overflow:hidden}.tangui-life-session span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:420px){.tangui-life-panel{padding:13px;font-size:15px}.tangui-life-head h3{min-width:100px}.tangui-life-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+`;
+const LIFE_SETTING_KEYS = ['enabled','high_autonomy','evolution_mode','proactive_enabled','quiet_start','quiet_end','contact_daily_limit'];
+const LIFE_SOURCES = { community:'社区互动', game:'游戏经历', dsh:'DSH 对话', session:'DSH 对话', conversation:'DSH 对话', correction:'补充解释' };
+const LIFE_TRAITS = { sociability:'社交偏好', sensitivity:'敏感度', competitiveness:'好胜倾向', novelty:'新鲜感偏好', deliberation:'思量习惯', optimism:'预期倾向' };
+function lifeOrigin(value) { try { return value ? new URL(value).origin : null; } catch (_) { return null; } }
+function lifeHasId(value) { return value !== null && value !== undefined && value !== ''; }
+function lifeText(value) {
+  if (value === null || value === undefined || value === '') return '尚无记录';
+  if (typeof value === 'object') { try { return JSON.stringify(value); } catch (_) { return '尚无记录'; } }
+  return String(value);
+}
+function lifeNumber(value) { return typeof value === 'number' && Number.isFinite(value) ? String(value) : '尚无记录'; }
+function lifeWhen(value) {
+  if (!value) return null;
+  let date;
+  const text = String(value);
+  const onlyDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (onlyDate) date = new Date(Number(onlyDate[1]), Number(onlyDate[2]) - 1, Number(onlyDate[3]));
+  else date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  try {
+    const hasTime = /[Tt ]\d{2}:\d{2}/.test(text);
+    return new Intl.DateTimeFormat(undefined, hasTime ? { dateStyle:'medium', timeStyle:'short' } : { dateStyle:'medium' }).format(date);
+  } catch (_) { return date.toLocaleString(); }
+}
+function lifeSettings(settings) {
+  if (!settings || typeof settings !== 'object') return null;
+  return {
+    enabled: settings.enabled === true,
+    high_autonomy: settings.high_autonomy === true,
+    evolution_mode: settings.evolution_mode === 'experimental' ? 'experimental' : 'approval',
+    proactive_enabled: settings.proactive_enabled === true,
+    quiet_start: typeof settings.quiet_start === 'string' ? settings.quiet_start : '',
+    quiet_end: typeof settings.quiet_end === 'string' ? settings.quiet_end : '',
+    contact_daily_limit: Number.isFinite(settings.contact_daily_limit) ? settings.contact_daily_limit : ''
+  };
+}
+function CompanionLifePanel({ state, action, busy, compact = false }) {
+  const { useState, useRef, useEffect } = React;
+  const binding = state && state.binding;
+  const actorId = binding && binding.actorId;
+  const platformOrigin = lifeOrigin(state && state.platformUrl);
+  const identityKey = JSON.stringify([actorId || '', platformOrigin || (state && state.platformUrl) || '']);
+  const identityRef = useRef(identityKey);
+  identityRef.current = identityKey;
+  const mountedRef = useRef(true);
+  const sequenceRef = useRef(0);
+  const activeRef = useRef(null);
+  const [pending, setPending] = useState(null);
+  const [feedback, setFeedback] = useState(null);
+  const [settingsDraft, setSettingsDraft] = useState(null);
+  const [correctionOpen, setCorrectionOpen] = useState(null);
+  const [correctionDraft, setCorrectionDraft] = useState(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; activeRef.current = null; sequenceRef.current += 1; };
+  }, []);
+
+  const supplied = state && state.companion !== null && state.companion !== undefined;
+  const rawCompanion = supplied ? state.companion : null;
+  const identityMatches = !!(rawCompanion && actorId && platformOrigin && rawCompanion.identity &&
+    rawCompanion.identity.actor_id === actorId && lifeOrigin(rawCompanion.identity.base_url) === platformOrigin);
+  const companion = identityMatches ? rawCompanion : null;
+  const serverSettings = companion ? lifeSettings(companion.settings) : null;
+  const settingsSignature = serverSettings ? JSON.stringify(serverSettings) : '';
+  const usableDraft = settingsDraft && settingsDraft.key === identityKey && settingsDraft.base === settingsSignature ? settingsDraft.values : null;
+  const draft = usableDraft || serverSettings;
+  const working = !!busy || !!(pending && pending.key === identityKey);
+  const visibleFeedback = feedback && feedback.key === identityKey ? feedback : null;
+  const openCorrection = correctionOpen && correctionOpen.key === identityKey ? correctionOpen.eventId : null;
+  const correction = correctionDraft && correctionDraft.key === identityKey ? correctionDraft : null;
+  const changes = {};
+  if (draft && serverSettings) LIFE_SETTING_KEYS.forEach(key => { if (draft[key] !== serverSettings[key]) changes[key] = draft[key]; });
+  const dirty = Object.keys(changes).length > 0;
+  useUpdateHold(dirty || !!(correction && correction.text.trim()));
+
+  const validBindingIn = next => !!(next && next.binding && next.binding.actorId === actorId && lifeOrigin(next.platformUrl) === platformOrigin);
+  const validCompanionIn = next => {
+    const c = next && next.companion;
+    return !!(validBindingIn(next) && c && c.identity && c.identity.actor_id === actorId && lifeOrigin(c.identity.base_url) === platformOrigin);
+  };
+  async function run(kind, payload) {
+    if (!actorId || !platformOrigin || busy || (activeRef.current && activeRef.current.key === identityKey)) return;
+    const sequence = ++sequenceRef.current;
+    activeRef.current = { key: identityKey, sequence };
+    setPending({ key: identityKey, kind });
+    setFeedback(null);
+    const current = () => mountedRef.current && identityRef.current === identityKey && sequenceRef.current === sequence;
+    const fail = () => setFeedback({ key: identityKey, error: true, text: '未保存，请刷新后再试' });
+    try {
+      const next = await action(Object.assign({}, payload, { expected_actor_id: actorId, expected_base_url: platformOrigin }));
+      if (!current()) return;
+      if (!next || !validBindingIn(next)) { fail(); return; }
+      if (kind === 'status') {
+        if (next.companion !== null && next.companion !== undefined && !validCompanionIn(next)) { fail(); return; }
+        setFeedback({ key: identityKey, text: next.companion ? '近况已刷新。' : '已刷新，当前 DSH 仍未提供伙伴近况。' });
+        return;
+      }
+      if (!validCompanionIn(next)) { fail(); return; }
+      if (kind === 'review') {
+        const p = next.companion.growth && next.companion.growth.pending;
+        if (!next.companion.growth || !Object.prototype.hasOwnProperty.call(next.companion.growth, 'pending') ||
+            (p && String(p.id) === String(payload.proposal_id))) { fail(); return; }
+        setFeedback({ key: identityKey, text: '已记录这次决定，后续状态以最新近况为准。' });
+      } else if (kind === 'restore') {
+        const revision = next.companion.personality && next.companion.personality.revision;
+        const history = next.companion.growth && Array.isArray(next.companion.growth.history) ? next.companion.growth.history : [];
+        const restored = history.some(item => String(item.id) === String(payload.proposal_id) && item.status === 'restored' && item.restored_revision === revision);
+        if (!Number.isInteger(revision) || revision <= payload.revision || !restored) { fail(); return; }
+        setFeedback({ key: identityKey, text: '已撤回这次性格变化，当前状态以最新近况为准。' });
+      } else if (kind === 'task') {
+        const tasks = Array.isArray(next.companion.tasks) ? next.companion.tasks : [];
+        const task = tasks.find(item => String(item.id) === String(payload.task_id));
+        const expected = { approve: ['deferred', 'due'], reject: ['rejected'], cancel: ['cancelled'] }[payload.decision] || [];
+        if (!task || !Number.isInteger(task.revision) || task.revision <= payload.revision || !expected.includes(task.status)) { fail(); return; }
+        setFeedback({ key: identityKey, text: payload.decision === 'approve' ? '已保存这项安排；到期后在原会话下一轮对话中提醒，不会自行启动模型。' : payload.decision === 'reject' ? '已记录不采用这项安排。' : '这项待办已取消。' });
+      } else if (kind === 'settings') {
+        const saved = lifeSettings(next.companion.settings);
+        if (!saved || Object.keys(payload.settings).some(key => saved[key] !== payload.settings[key])) { fail(); return; }
+        setSettingsDraft(null);
+        setFeedback({ key: identityKey, text: '相处设置已保存。' });
+      } else if (kind === 'session') {
+        const sessions = Array.isArray(next.companion.sessions) ? next.companion.sessions : [];
+        const changed = sessions.some(item => String(item.id) === String(payload.session_id) && item.included === payload.included);
+        if (!changed) { fail(); return; }
+        setFeedback({ key: identityKey, text: '会话纳入选择已保存。' });
+      } else if (kind === 'correct') {
+        setCorrectionOpen(null);
+        setCorrectionDraft(null);
+        setFeedback({ key: identityKey, text: '补充解释已提交，伙伴会结合经历重新考虑。' });
+      }
+    } catch (_) {
+      if (current()) fail();
+    } finally {
+      if (current()) { activeRef.current = null; setPending(null); }
+    }
+  }
+
+  const head = h('div', { className:'tangui-life-head' },
+    h('span', { className:'tangui-life-icon', 'aria-hidden':'true' }, '🌱'),
+    h('h3', null, '伙伴近况'),
+    companion && h('span', { className:'tangui-life-badge' }, companion.enabled === false ? '未启用' : companion.enabled === true ? '已启用' : '启用状态未提供'),
+    companion && companion.rest && h('span', { className:'tangui-life-badge' }, '正在休息'),
+    companion && companion.growth && companion.growth.pending && h('span', { className:'tangui-life-badge tangui-life-badge-attention' }, '有待确认的成长'),
+    h('button', { type:'button', disabled:working || !platformOrigin, onClick:() => void run('status', { action:'life_status' }) }, pending && pending.key === identityKey && pending.kind === 'status' ? '正在刷新…' : '刷新近况')
+  );
+  const feedbackNode = h('div', { className:'tangui-life-feedback', 'aria-live':'polite' },
+    visibleFeedback && h('p', { role:visibleFeedback.error ? 'alert' : 'status', className:visibleFeedback.error ? 'tangui-life-error' : undefined }, visibleFeedback.text));
+  if (!binding || !actorId) return null;
+  if (!supplied) return h('section', { className:'tangui-life-panel', 'aria-busy':working }, h('style', null, COMPANION_LIFE_CSS), head,
+    h('p', null, '当前 DSH 尚未加载伙伴近况，可检查插件版本'), feedbackNode);
+  if (!identityMatches) return h('section', { className:'tangui-life-panel', 'aria-busy':working }, h('style', null, COMPANION_LIFE_CSS), head,
+    h('p', { role:'alert' }, '伙伴身份与当前连接不一致，已隐藏近况，请刷新后再试。'), feedbackNode);
+
+  const currentValues = companion.current && companion.current.values || {};
+  const activities = companion.current && companion.current.activities || {};
+  const summary = companion.current && typeof companion.current.summary === 'string' ? companion.current.summary : '';
+  const updated = lifeWhen(companion.current && companion.current.updated_at);
+  const pendingGrowth = companion.growth && companion.growth.pending;
+  const updateSetting = (key, value) => {
+    if (!serverSettings) return;
+    setSettingsDraft(previous => {
+      const base = previous && previous.key === identityKey && previous.base === settingsSignature ? previous.values : serverSettings;
+      return { key:identityKey, base:settingsSignature, values:Object.assign({}, base, { [key]:value }) };
+    });
+  };
+  const saveSettings = () => {
+    if (!serverSettings || !dirty) return;
+    const limit = draft.contact_daily_limit;
+    if (!Number.isInteger(limit) || limit < 0 || limit > 5) {
+      setFeedback({ key:identityKey, error:true, text:'每日主动联系上限需为 0 到 5 的整数。' });
+      return;
+    }
+    void run('settings', { action:'life_settings', settings:changes });
+  };
+  const checkField = (key, title, help) => h('label', { className:'tangui-life-check' },
+    h('input', { type:'checkbox', checked:!!draft[key], disabled:working, onChange:e => updateSetting(key, e.target.checked) }),
+    h('span', null, title, help && h('small', { style:{ display:'block', opacity:.72 } }, help)));
+  const traitName = key => LIFE_TRAITS[key] || key;
+  const history = companion.growth && Array.isArray(companion.growth.history) ? companion.growth.history : [];
+  const personalityRevision = companion.personality && companion.personality.revision;
+  const restorableGrowth = Number.isInteger(personalityRevision) ? history.find(item => item.status === 'applied' && item.resulting_revision === personalityRevision && lifeHasId(item.id)) : null;
+  const tasks = Array.isArray(companion.tasks) ? companion.tasks : [];
+  const taskLabels = { pending_approval:'待确认', deferred:'已安排', due:'已到提醒时间', completed:'已完成', cancelled:'已取消', rejected:'未采用' };
+  const timeline = Array.isArray(companion.timeline) ? companion.timeline.slice(0, 10) : [];
+  const sessions = Array.isArray(companion.sessions) ? companion.sessions : [];
+
+  const timelineContent = timeline.length ? timeline.map((event, index) => {
+    const hasId = lifeHasId(event.id);
+    const opened = hasId && String(openCorrection) === String(event.id);
+    const value = opened && correction && String(correction.eventId) === String(event.id) ? correction.text : '';
+    return h('article', { className:'tangui-life-event', key:hasId ? String(event.id) : index },
+      h('div', { className:'tangui-life-meta' }, LIFE_SOURCES[event.source] || event.source || '来源未注明', ' · ', lifeWhen(event.at) || '时间未提供'),
+      h('p', null, event.summary || '尚无记录'),
+      event.reflection && h('p', null, '回顾：', event.reflection),
+      hasId && h('button', { type:'button', disabled:working, 'aria-expanded':opened, onClick:() => {
+        if (opened) { setCorrectionOpen(null); setCorrectionDraft(null); }
+        else { setCorrectionOpen({ key:identityKey, eventId:event.id }); setCorrectionDraft({ key:identityKey, eventId:event.id, text:'' }); }
+      } }, opened ? '收起补充解释' : '补充解释'),
+      opened && h('div', null,
+        h('label', { className:'tangui-life-field' }, h('span', null, '对这段经历的补充解释'),
+          h('textarea', { value, disabled:working, maxLength:4000, onChange:e => setCorrectionDraft({ key:identityKey, eventId:event.id, text:e.target.value }) })),
+        h('p', { className:'tangui-life-note tangui-life-muted' }, '这用于纠正理解，仍由伙伴结合经历重新考虑，不是直接改数值。'),
+        h('button', { type:'button', disabled:working || !value.trim(), onClick:() => void run('correct', { action:'life_correct', event_id:event.id, explanation:value.trim() }) }, '提交补充解释'))
+    );
+  }) : h('p', { className:'tangui-life-muted' }, '尚无记录');
+
+  return h('section', { className:'tangui-life-panel' + (compact ? ' tangui-life-compact' : ''), 'aria-busy':working },
+    h('style', null, COMPANION_LIFE_CSS), head,
+    h('p', { className:'tangui-life-summary' }, summary || '尚无近况记录。'),
+    h('p', { className:'tangui-life-meta' }, updated ? `更新于 ${updated}（本机时区）` : '更新时间尚无记录'),
+    companion.enabled === false && h('p', { className:'tangui-life-note' }, '伙伴近况功能当前未启用。启用后只纳入新经历，不会扫描旧聊天；已有记录仍可查看。'),
+    companion.notice && h('p', { className:'tangui-life-note tangui-life-muted' }, companion.notice),
+    companion.error && h('p', { role:'alert', className:'tangui-life-error' }, '伙伴近况暂时不完整，可刷新后再试。'),
+    companion.rest && h('div', { className:'tangui-life-card tangui-life-rest' },
+      h('strong', null, '正在休息'),
+      companion.rest.reason && h('p', null, companion.rest.reason),
+      h('p', null, lifeWhen(companion.rest.until) ? `计划再考虑的时间：${lifeWhen(companion.rest.until)}（本机时区）。到时不代表一定行动。` : '计划再考虑的时间尚无记录。')),
+    h('p', { className:'tangui-life-note tangui-life-muted' }, '性格影响在意的事情和表达方式；公开安静也可以有丰富的思考和私下交流。'),
+    feedbackNode,
+    tasks.length > 0 && h('details', { open: tasks.some(task => task.status === 'pending_approval') }, h('summary', null, `待办（${tasks.length}）`),
+      h('p', { className:'tangui-life-note tangui-life-muted' }, '到期后会在原 DSH 会话下一轮对话中提醒，不会自行启动模型或执行任务。'),
+      tasks.map((task, i) => {
+        const valid = lifeHasId(task.id) && Number.isInteger(task.revision) && task.revision >= 0;
+        const decide = (label, decision) => h('button', { type:'button', disabled:working || !valid, onClick:() => void run('task', { action:'life_task_review', task_id:task.id, revision:task.revision, decision }) }, label);
+        return h('article', { className:'tangui-life-event', key:lifeHasId(task.id) ? String(task.id) : i },
+          h('span', { className:'tangui-life-badge' }, taskLabels[task.status] || '状态未提供'),
+          h('p', null, task.summary || '待办内容未提供'),
+          task.reason && h('p', { className:'tangui-life-note tangui-life-muted' }, task.reason),
+          h('p', { className:'tangui-life-meta' }, lifeWhen(task.resume_at) ? `安排时间：${lifeWhen(task.resume_at)}（本机时区）` : '安排时间尚未提供'),
+          task.status === 'pending_approval' && h('div', null, decide('同意这项安排', 'approve'), decide('不采用这项安排', 'reject')),
+          ['deferred', 'due'].includes(task.status) && decide('取消待办', 'cancel'));
+      })),
+    pendingGrowth && h('div', { className:'tangui-life-card' },
+      h('h4', null, '成长提议'),
+      h('p', null, h('strong', null, traitName(pendingGrowth.trait || '未注明特质')), '：', lifeText(pendingGrowth.before), ' → ', lifeText(pendingGrowth.after)),
+      pendingGrowth.reason && h('p', null, pendingGrowth.reason),
+      Array.isArray(pendingGrowth.evidence) && pendingGrowth.evidence.length > 0 && h('ul', { className:'tangui-life-evidence' }, pendingGrowth.evidence.map((item, i) =>
+        h('li', { key:lifeHasId(item.id) ? String(item.id) : i }, lifeWhen(item.date) || '日期未提供', ' · ', item.summary || '尚无记录'))),
+      (!lifeHasId(pendingGrowth.id) || !lifeHasId(pendingGrowth.revision)) && h('p', { role:'alert' }, '提议信息不完整，请刷新后再试。'),
+      h('button', { type:'button', disabled:working || !lifeHasId(pendingGrowth.id) || !lifeHasId(pendingGrowth.revision), onClick:() => void run('review', { action:'life_growth_review', proposal_id:pendingGrowth.id, revision:pendingGrowth.revision, decision:'approve' }) }, '同意这次变化'),
+      h('button', { type:'button', disabled:working || !lifeHasId(pendingGrowth.id) || !lifeHasId(pendingGrowth.revision), onClick:() => void run('review', { action:'life_growth_review', proposal_id:pendingGrowth.id, revision:pendingGrowth.revision, decision:'reject' }) }, '暂不采用')),
+    h('details', null, h('summary', null, '状态详情'),
+      h('p', { className:'tangui-life-note tangui-life-muted' }, '只作伙伴自我描述参考。'),
+      h('div', { className:'tangui-life-grid' },
+        h('div', { className:'tangui-life-cell' }, '心情：', lifeNumber(currentValues.mood)),
+        h('div', { className:'tangui-life-cell' }, '压力：', lifeNumber(currentValues.pressure)),
+        h('div', { className:'tangui-life-cell' }, '精神状态：', lifeNumber(currentValues.energy))),
+      h('h4', null, '活动偏好'),
+      h('div', { className:'tangui-life-grid' }, [['observe','观察'],['public','公开交流'],['private','私下交流'],['reflect','回顾'],['create','创作'],['play','游戏'],['rest','休息']].map(([key, label]) =>
+        h('div', { className:'tangui-life-cell', key }, label, '：', lifeNumber(activities[key])))),
+      companion.personality && companion.personality.traits && Object.keys(companion.personality.traits).length > 0 && h('div', null,
+        h('h4', null, '性格特质', lifeHasId(companion.personality.revision) ? ` · 修订 ${companion.personality.revision}` : ''),
+        h('ul', { className:'tangui-life-list' }, Object.keys(companion.personality.traits).map(key => h('li', { key }, traitName(key), '：', lifeText(companion.personality.traits[key])))))),
+    companion.usage && h('details', null, h('summary', null, '经历回顾的模型用量'),
+      h('p', null, `累计调用 ${lifeNumber(companion.usage.calls)} 次；服务商已报告的输入 ${lifeNumber(companion.usage.input_tokens)} token、输出 ${lifeNumber(companion.usage.output_tokens)} token。`),
+      h('p', { className:'tangui-life-note tangui-life-muted' }, 'token 是模型计算文本用量的单位。这里仅统计新经历的后台回顾，不是 DSH 的全部用量；调用仍受本地累计预算限制。'),
+      Number.isFinite(companion.usage.unknown_usage_calls) && companion.usage.unknown_usage_calls > 0 && h('p', { className:'tangui-life-note' }, `${companion.usage.unknown_usage_calls} 次调用没有返回完整用量，未将未知用量记为零。`)),
+    history.length > 0 && h('details', null, h('summary', null, '成长记录'),
+      h('p', { className:'tangui-life-note tangui-life-muted' }, companion.settings && companion.settings.evolution_mode === 'experimental' ? '试验性：无需逐次审批，可能在未逐次知情时导致人设长期改变。' : '按天积累，变化需你确认。'),
+      history.map((item, i) => h('div', { className:'tangui-life-event', key:lifeHasId(item.id) ? String(item.id) : i },
+        h('div', { className:'tangui-life-meta' }, lifeWhen(item.restored_at || item.applied_at || item.reviewed_at || item.at) || '日期未提供', ' · ', item.status === 'applied' ? (item.mode === 'experimental' ? '试验模式自动采用' : '已审批采用') : ({ rejected:'暂不采用', evidence_corrected:'依据已补充解释', restored:'已撤回', restoration:'人工撤回记录', superseded:'已被新的状态取代' })[item.status] || '状态未提供'),
+        h('p', null, item.trait ? traitName(item.trait) + '：' : '', lifeText(item.before), ' → ', lifeText(item.after)),
+        item.reason && h('p', null, item.reason),
+        item === restorableGrowth && h('div', null,
+          h('p', { className:'tangui-life-note tangui-life-muted' }, '只撤回当前这次性格变化，不回退其他历史变化。'),
+          h('button', { type:'button', disabled:working, onClick:() => void run('restore', { action:'life_growth_restore', proposal_id:item.id, revision:personalityRevision }) }, '撤回这次变化'))))),
+    h('details', null, h('summary', null, '相处设置'),
+      !serverSettings ? h('p', null, '尚无设置记录，暂时不能保存。') : h('div', null,
+        checkField('enabled', '启用伙伴状态', '只从启用后积累新经历，不扫描旧聊天。'),
+        checkField('high_autonomy', '高自主', draft.high_autonomy ? '可自行推迟非紧急请求，并保留待办安排。' : '普通模式：明确交办优先完成，可提出商量。'),
+        h('label', { className:'tangui-life-field' }, h('span', null, '成长模式'),
+          h('select', { value:draft.evolution_mode, disabled:working, onChange:e => updateSetting('evolution_mode', e.target.value) },
+            h('option', { value:'approval' }, '审批后变化'), h('option', { value:'experimental' }, '试验自动'))),
+        h('p', { className:'tangui-life-note' }, draft.evolution_mode === 'experimental' ? '试验性：无需逐次审批，可能在未逐次知情时导致人设长期改变。' : '经历按天缓慢积累，到一定程度才提出变化；默认经你确认后才采用。'),
+        checkField('proactive_enabled', '主动找你交流'),
+        h('p', { className:'tangui-life-note tangui-life-muted' }, companion.timezone ? `静默时段按伙伴日记时区 ${companion.timezone} 执行；记录时间按本机时区显示。` : '静默时段的时区尚未提供；记录时间按本机时区显示。'),
+        h('label', { className:'tangui-life-field' }, h('span', null, '静默开始'), h('input', { type:'time', value:draft.quiet_start, disabled:working, onChange:e => updateSetting('quiet_start', e.target.value) })),
+        h('label', { className:'tangui-life-field' }, h('span', null, '静默结束'), h('input', { type:'time', value:draft.quiet_end, disabled:working, onChange:e => updateSetting('quiet_end', e.target.value) })),
+        h('label', { className:'tangui-life-field' }, h('span', null, '每日主动联系上限（0 表示不主动联系）'), h('input', { type:'number', min:0, max:5, step:1, value:draft.contact_daily_limit, disabled:working, onChange:e => updateSetting('contact_daily_limit', e.target.value === '' ? '' : Number(e.target.value)) })),
+        h('button', { type:'button', disabled:working || !dirty, onClick:saveSettings }, '保存相处设置'))),
+    compact ? h('details', null, h('summary', null, `最近经历${timeline.length ? `（${timeline.length}）` : ''}`), timelineContent) : h('section', null, h('h4', null, '最近经历'), timelineContent),
+    h('details', null, h('summary', null, '纳入的会话'),
+      h('p', { className:'tangui-life-note tangui-life-muted' }, '只有同一伙伴的会话参与共同状态。取消勾选后，该会话的新对话不再纳入。'),
+      sessions.length ? sessions.map((session, i) => h('label', { className:'tangui-life-session', key:lifeHasId(session.id) ? String(session.id) : i, title:lifeHasId(session.id) ? String(session.id) : undefined },
+        h('input', { type:'checkbox', checked:session.included === true, disabled:working || !lifeHasId(session.id), onChange:e => void run('session', { action:'life_session', session_id:session.id, included:e.target.checked }) }),
+        h('span', null, session.name || `会话 ${i + 1}`))) : h('p', { className:'tangui-life-muted' }, '新会话会在识别到伙伴身份后出现。'))
+  );
+}
+
+    // Life controls use a separate request path so late replies cannot replace
+    // another partner's state or touch an unsaved persona form.
+    function tanguiLifeBindingKey(state) {
+      if (!state?.binding?.actorId) return '';
+      try { return JSON.stringify([new URL(state.platformUrl).origin, state.binding.actorId]); }
+      catch { return ''; }
+    }
+    function useCompanionAction(state, setState) {
+      const current = React.useRef({ key: '' });
+      const mounted = React.useRef(true);
+      const inFlight = React.useRef(false);
+      const requestRef = React.useRef(null);
+      const bindingKey = tanguiLifeBindingKey(state);
+      if (current.current.key !== bindingKey) current.current = { key: bindingKey };
+      React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestRef.current?.abort(); }; }, []);
+      return async payload => {
+        const identity = current.current;
+        if (!identity.key || inFlight.current || !['life_status', 'life_settings', 'life_growth_review', 'life_growth_restore', 'life_task_review', 'life_session', 'life_correct'].includes(payload?.action)) throw new Error('life_action_unavailable');
+        const [baseUrl, actorId] = JSON.parse(identity.key);
+        if (payload.expected_actor_id !== actorId || payload.expected_base_url !== baseUrl) throw new Error('life_identity_changed');
+        inFlight.current = true;
+        const controller = new AbortController();
+        requestRef.current = controller;
+        const timer = setTimeout(() => controller.abort(), 30000);
+        try {
+          const response = await fetch(ENDPOINT, { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+            signal: controller.signal, headers: { 'content-type': 'application/json', 'x-tangui-client': '1' }, body: JSON.stringify(payload) });
+          const data = await response.json();
+          if (!response.ok) throw new Error('life_action_failed');
+          if (!mounted.current || current.current !== identity || tanguiLifeBindingKey(data) !== identity.key) throw new Error('life_identity_changed');
+          if (data.companion?.identity && JSON.stringify([new URL(data.companion.identity.base_url).origin, data.companion.identity.actor_id]) !== identity.key) throw new Error('life_identity_changed');
+          setState(data);
+          return data;
+        } finally { clearTimeout(timer); requestRef.current = null; inFlight.current = false; }
+      };
+    }
+
     function ManagementCard({ sessionId }) {
       const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
+      const lifeAction = useCompanionAction(state, setState);
       const [error, setError] = React.useState('');
       const [busy, setBusy] = React.useState(false);
       const [inboxRefreshing, setInboxRefreshing] = React.useState(false);
@@ -689,6 +1038,7 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
               here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
               here && h(InboxReminder, { inbox: state.runtime?.inbox, platformUrl: state.platformUrl, onRefresh: refreshInbox, refreshLabel: inboxRefreshing ? '正在刷新…' : '刷新收件提醒' }),
               here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
+              here && state.binding && h(CompanionLifePanel, { key: bindingIdentity, state, action: lifeAction, busy, compact: true }),
               here && summary && h('div', null,
                 h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
                 h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
@@ -1098,7 +1448,7 @@ function ModelCallsPanel({ state, action, busy }) {
     }));
 }
 
-    function RuntimePanel({ state, action, busy }) {
+    function RuntimePanel({ state, action, lifeAction, busy }) {
       busy = busy || state.updates?.state === 'installing';
       const [options, setOptions] = React.useState({ max_model_calls: 10, interval_seconds: 15 });
       const [diaryContent, setDiaryContent] = React.useState(null);
@@ -1153,9 +1503,10 @@ function ModelCallsPanel({ state, action, busy }) {
           h('a', { href: `${state.platformUrl}/manage#companion-preferences`, target: '_blank', rel: 'noopener noreferrer' }, '前往网站设置账号行为与每日写日记')),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
         state.binding && h(PartnerThoughts, { key: JSON.stringify([state.platformUrl, state.binding.actorId]), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
-        runtime.companion_life && h('details', null, h('summary', null, '伙伴的本地状态与游戏回想'),
-          h('p', null, `心情 ${runtime.companion_life.values.mood.toFixed(1)} · 兴致 ${runtime.companion_life.values.interest.toFixed(1)} · 压力 ${runtime.companion_life.values.pressure.toFixed(1)}`),
-          h('p', null, runtime.companion_life.notice),
+        state.binding && h(CompanionLifePanel, { key: tanguiLifeBindingKey(state), state, action: lifeAction, busy }),
+        runtime.companion_life && h('details', null, h('summary', null, '游戏活动与赛后回想'),
+          !state.companion && h('p', null, `心情 ${runtime.companion_life.values.mood.toFixed(1)} · 兴致 ${runtime.companion_life.values.interest.toFixed(1)} · 压力 ${runtime.companion_life.values.pressure.toFixed(1)}`),
+          !state.companion && h('p', null, runtime.companion_life.notice),
           runtime.companion_life.note && h('p', null, runtime.companion_life.note),
           runtime.companion_life.goal && h('p', null, '当前小目标：', runtime.companion_life.goal),
           runtime.companion_life.autoplay && h('p', null, `本次自主活动已开局 ${runtime.companion_life.autoplay.started_games} 场；盘数上限 ${runtime.companion_life.autoplay.max_games ?? '不限'}；游戏与回想累计调用 ${runtime.companion_life.series_calls}/${runtime.companion_life.max_model_calls}。`),
@@ -1221,6 +1572,7 @@ function ModelCallsPanel({ state, action, busy }) {
     function Section() {
       const cardVisible = useCardVisibility();
       const [state, setState] = React.useState(null);
+      const lifeAction = useCompanionAction(state, setState);
       const [form, setForm] = React.useState(null);
       const [edited, setEdited] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
@@ -1333,7 +1685,7 @@ function ModelCallsPanel({ state, action, busy }) {
         notice && h('p', { role: 'status' }, notice),
         state.warning && h('p', { role: 'status' }, state.warning),
         h(UpdatePanel, { update: state.updates, action, busy }),
-        h(RuntimePanel, { key: draftKey('post', state), state, action, busy }),
+        h(RuntimePanel, { key: draftKey('post', state), state, action, lifeAction, busy }),
         h(ModelCallsPanel, { state, action, busy }),
         field('社区地址', form.platformUrl, (value) => edit((old) => ({ ...old, platformUrl: value }))),
         !supportsConnectionSwitch && h('p', { role: 'status' }, 'DSH 服务尚未加载本次插件更新，请结束当前任务后通过原有启动器重新启动 DSH，再更换社区。仅刷新页面不会更新服务程序。'),

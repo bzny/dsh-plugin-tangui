@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { RegistrationBridge, readSoul, platformUrl } from '../lib/core.js';
 import plugin, { Config, apply } from '../lib/index.js';
 import { registerCompanionTool } from '../lib/companion-tool.js';
+import { CompanionMind } from '../lib/companion-mind.js';
 
 const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
 const SOUL = '# SOUL\n\n## 身份\n- **名字**：测试岛风\n- **角色**：秘书舰\n\n## 性格特质\n- 活泼、细心\n\n## 沟通风格\n- **语言**：中文\n\n## 边界\n- 未授权不发帖\n';
@@ -85,6 +86,68 @@ async function fixture(t, { complete = true, soul = SOUL, normalizer } = {}) {
 async function connect(f) {
   await f.bridge.configure({ enabled: true });
   f.remote.approved = true; f.advance(); await f.bridge.tick();
+}
+
+async function registrationWeb(t, f) {
+  let handler;
+  const disposers = [], injections = [], nativeFetch = globalThis.fetch;
+  const server = createServer((req, res) => { void handler(req, res); });
+  // Register cleanup before apply: a missing host service or failed setup must
+  // not strand the HTTP listener or the plugin's scheduled work.
+  t.after(async () => {
+    const cleanup = await Promise.allSettled(disposers.reverse().map(stop => Promise.resolve().then(() => stop?.())));
+    await new Promise(done => server.close(done));
+    for (const result of cleanup) if (result.status === 'rejected') throw result.reason;
+  });
+  t.mock.method(globalThis, 'fetch', (url, options) => String(url).startsWith('https://api.github.com/repos/bzny/dsh-plugin-tangui/') ?
+    Promise.resolve(new Response(JSON.stringify({ draft: false, prerelease: false, tag_name: 'v0.5.14' }))) : nativeFetch(url, options));
+  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const effect = setup => disposers.push(setup());
+  const services = {
+    connection: { requestRejection: req => req.headers.cookie === 'dsh-test-cookie=authorized' ? undefined : 401 },
+    webServer: { getOrigin: () => origin, register(route) { handler = route.handler; return () => {}; } },
+  };
+  const ctx = { ...services, effect, get: name => services[name], inject(names, callback) {
+    injections.push(names);
+    // Match Cordis availability: optional tools, agents and systemPrompt are
+    // absent in this web-only fixture, so their callback is not run.
+    if (names.every(name => services[name] !== undefined)) callback(ctx);
+  } };
+  apply(ctx, Config({ memoryDir: f.options.memoryDir, stateFile: f.options.stateFile, platformUrl: f.options.baseUrl }));
+  const endpoint = `${origin}/api/tangui/registration`;
+  // Use HTTP directly so hostile Host / fetch metadata headers are sent as
+  // written; fetch may normalize them before the route can be tested.
+  const post = (input, headers = {}) => new Promise((done, reject) => {
+    const request = httpRequest(endpoint, { method: 'POST', headers: {
+      cookie: 'dsh-test-cookie=authorized', origin, 'content-type': 'application/json', 'x-tangui-client': '1', ...headers,
+    } }, response => {
+      const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.on('error', reject);
+      response.on('end', () => done(new Response(Buffer.concat(chunks), { status: response.statusCode })));
+    });
+    request.on('error', reject); request.setTimeout(3000, () => request.destroy(new Error('isolated_route_timeout')));
+    request.end(JSON.stringify(input));
+  });
+  return { origin, endpoint, post, injections, fetch: nativeFetch };
+}
+
+async function lifeFixture(t) {
+  const f = await fixture(t); await connect(f); await f.bridge.configure({ enabled: false });
+  const identity = { actor_id: f.remote.actor.id, base_url: f.options.baseUrl, memory_dir: f.memoryDir };
+  const mind = new CompanionMind({ directory: join(dirname(f.options.stateFile), 'companion-state'), identity: () => identity });
+  const guard = { expected_actor_id: identity.actor_id, expected_base_url: identity.base_url };
+  mind.configure({ ...guard, settings: { enabled: true } });
+  const event = mind.noteDialog({ session_id: 'session-private', event_id: 'private-event', role: 'user', text: 'PRIVATE_LIFE_DIALOGUE', at: new Date().toISOString() });
+  mind.recordAppraisal({ event_ids: [event.id], summary: 'PRIVATE_LIFE_SUMMARY', reflection: 'PRIVATE_LIFE_REFLECTION',
+    delta: { mood: 1 }, profile: { traits: { sociability: 50 }, baselines: {}, activities: {}, description: 'PRIVATE_PERSONA_DESCRIPTION' } }, { session_id: 'session-private' });
+  // The route tests use one already prepared proposal; slow growth generation
+  // belongs to the core tests, not the authentication fixture.
+  const proposal = { id: 'growth-fixture', trait: 'sociability', before: 50, after: 52, revision: 0,
+    reason: 'PRIVATE_GROWTH_REASON', at: new Date().toISOString(), evidence: [{ id: event.id, summary: 'PRIVATE_GROWTH_EVIDENCE', date: '2026-11-01' }] };
+  mind.data.growth.pending = proposal; mind.save();
+  const task = mind.deferTask({ event_id: event.id, summary: 'PRIVATE_TASK_SUMMARY', reason: 'PRIVATE_TASK_REASON',
+    urgency: 'nonurgent', resume_at: new Date(Date.now() + 3600000).toISOString() }, { session_id: 'session-private' }).task;
+  return { ...f, guard, event, proposal, task, lifeFile: mind.file };
 }
 
 test('disabled by default; completion gates pairing; two files only; exact identity and private import', async (t) => {
@@ -197,31 +260,99 @@ test('edited upload retains only reviewed text; endpoint change cannot leak stor
 test('DSH Config exports and route authentication protect both data and error bodies', async (t) => {
   assert.equal(plugin.Config, Config);
   const f = await fixture(t);
-  let handler;
-  const disposers = [];
-  const server = createServer((req, res) => { void handler(req, res); });
-  await new Promise((done) => server.listen(0, '127.0.0.1', done));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const webCtx = {
-    connection: { requestRejection(req) { return req.headers.cookie === 'dsh-test-cookie=authorized' ? undefined : 401; } },
-    webServer: { getOrigin() { return origin; }, register(route) { handler = route.handler; return () => {}; } },
-    effect(setup) { disposers.push(setup()); },
-  };
-  apply({ effect(setup) { disposers.push(setup()); }, inject(names, callback) { if (names[0] === 'tools') return;
-    assert.deepEqual(names, ['webServer', 'connection']); callback(webCtx); } },
-    Config({ memoryDir: f.options.memoryDir, stateFile: f.options.stateFile, platformUrl: f.options.baseUrl }));
-  t.after(async () => { for (const stop of disposers) stop(); await new Promise((done) => server.close(done)); });
+  const web = await registrationWeb(t, f);
+  assert.ok(web.injections.some(names => names.includes('systemPrompt') && names.includes('agents')));
   for (const method of ['GET', 'POST']) {
-    const response = await fetch(`${origin}/api/tangui/registration`, { method });
+    const response = await web.fetch(web.endpoint, { method });
     const body = await response.text();
     assert.equal(response.status, 401); assert.doesNotMatch(body, /SOUL|测试岛风|draft|state/);
   }
-  const response = await fetch(`${origin}/api/tangui/registration`, { headers: { cookie: 'dsh-test-cookie=authorized' } });
+  const response = await web.fetch(web.endpoint, { headers: { cookie: 'dsh-test-cookie=authorized' } });
   assert.equal(response.status, 200);
   const state = await response.json();
   assert.equal(state.draft.description, SOUL);
   assert.equal(state.normalization.status, 'unprepared');
   assert.equal(f.calls.length, 0);
+});
+
+test('all life routes reject unauthenticated reads and mutations before exposing private companion state', async t => {
+  const f = await lifeFixture(t), web = await registrationWeb(t, f), before = readFileSync(f.lifeFile, 'utf8');
+  const inputs = [
+    { action: 'life_status' },
+    { action: 'life_settings', ...f.guard, settings: { high_autonomy: true } },
+    { action: 'life_session', ...f.guard, session_id: 'session-private', included: false },
+    { action: 'life_correct', ...f.guard, event_id: f.event.id, explanation: '这不是亲身发生的事。' },
+    { action: 'life_growth_review', ...f.guard, proposal_id: f.proposal.id, revision: f.proposal.revision, decision: 'approve' },
+    { action: 'life_growth_restore', ...f.guard, proposal_id: f.proposal.id, revision: 1 },
+    { action: 'life_task_review', ...f.guard, task_id: f.task.id, revision: 0, decision: 'approve' },
+  ];
+  for (const input of inputs) {
+    const response = await web.post(input, { cookie: '' });
+    assert.equal(response.status, 401);
+    const text = await response.text();
+    assert.equal(JSON.parse(text).error.code, 'dsh_auth_required');
+    assert.doesNotMatch(text, /PRIVATE_|SOUL|测试岛风|companion|state|FAKE_PLUGIN_TOKEN/);
+  }
+  const get = await web.fetch(web.endpoint);
+  assert.equal(get.status, 401); assert.doesNotMatch(await get.text(), /PRIVATE_|companion|state/);
+  assert.equal(readFileSync(f.lifeFile, 'utf8'), before);
+});
+
+test('life mutation routes require same-origin UI headers and the displayed current identity', async t => {
+  const f = await lifeFixture(t), web = await registrationWeb(t, f), before = readFileSync(f.lifeFile, 'utf8');
+  const input = { action: 'life_settings', ...f.guard, settings: { high_autonomy: true } };
+  for (const [headers, code] of [[{ origin: 'https://foreign.invalid' }, 'invalid_origin'], [{ 'x-tangui-client': '' }, 'invalid_request'],
+    [{ 'sec-fetch-site': 'cross-site' }, 'invalid_request'], [{ host: 'foreign.invalid' }, 'invalid_host']]) {
+    const response = await web.post(input, headers);
+    assert.equal(response.status, 403); assert.equal((await response.json()).error.code, code);
+  }
+  for (const request of [{ ...input, expected_actor_id: 'another-companion' }, { ...input, expected_base_url: 'https://another.invalid' },
+    { action: 'life_settings', settings: input.settings }]) {
+    const response = await web.post(request);
+    assert.equal(response.status, 409); assert.equal((await response.json()).error.code, 'life_identity_changed');
+  }
+  const invalid = await web.post({ ...input, settings: { budget: 9999 } });
+  assert.equal(invalid.status, 409); assert.equal((await invalid.json()).error.code, 'life_settings_invalid');
+  assert.equal(readFileSync(f.lifeFile, 'utf8'), before);
+});
+
+test('authenticated life status, settings, explicit reviews, restoration, correction and session exclusion persist', async t => {
+  const f = await lifeFixture(t), web = await registrationWeb(t, f);
+  const get = await web.fetch(web.endpoint, { headers: { cookie: 'dsh-test-cookie=authorized' } });
+  assert.equal(get.status, 200); assert.equal((await get.json()).companion.current.summary, 'PRIVATE_LIFE_SUMMARY');
+  const status = await web.post({ action: 'life_status' });
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).companion.growth.pending.id, f.proposal.id);
+  const settings = await web.post({ action: 'life_settings', ...f.guard, settings: { high_autonomy: true } });
+  assert.equal(settings.status, 200); assert.equal((await settings.json()).companion.settings.high_autonomy, true);
+  const stale = await web.post({ action: 'life_growth_review', ...f.guard, proposal_id: f.proposal.id, revision: 1, decision: 'approve' });
+  assert.equal(stale.status, 409); assert.equal((await stale.json()).error.code, 'life_proposal_outdated');
+  const reviewed = await web.post({ action: 'life_growth_review', ...f.guard, proposal_id: f.proposal.id, revision: 0, decision: 'approve' });
+  assert.equal(reviewed.status, 200);
+  const approved = (await reviewed.json()).companion;
+  assert.equal(approved.personality.revision, 1); assert.equal(approved.personality.traits.sociability, 52);
+  assert.equal(approved.growth.pending, null); assert.equal(approved.growth.history.at(-1).mode, 'approved');
+  const restored = await web.post({ action: 'life_growth_restore', ...f.guard, proposal_id: f.proposal.id, revision: 1 });
+  assert.equal(restored.status, 200);
+  const restoration = (await restored.json()).companion;
+  assert.equal(restoration.personality.revision, 2); assert.equal(restoration.personality.traits.sociability, 50);
+  assert.equal(restoration.growth.history.at(-1).mode, 'human_restore');
+  const taskStale = await web.post({ action: 'life_task_review', ...f.guard, task_id: f.task.id, revision: 1, decision: 'approve' });
+  assert.equal(taskStale.status, 409); assert.equal((await taskStale.json()).error.code, 'life_task_outdated');
+  const taskReview = await web.post({ action: 'life_task_review', ...f.guard, task_id: f.task.id, revision: 0, decision: 'approve' });
+  assert.equal(taskReview.status, 200);
+  assert.equal((await taskReview.json()).companion.tasks.find(item => item.id === f.task.id).status, 'deferred');
+  const corrected = await web.post({ action: 'life_correct', ...f.guard, event_id: f.event.id, explanation: '刚才是在描述故事，请不要当成亲身经历。' });
+  assert.equal(corrected.status, 200); await corrected.arrayBuffer();
+  const excluded = await web.post({ action: 'life_session', ...f.guard, session_id: 'session-private', included: false });
+  assert.equal(excluded.status, 200); assert.equal((await excluded.json()).companion.sessions.find(item => item.id === 'session-private').included, false);
+  const saved = JSON.parse(readFileSync(f.lifeFile, 'utf8'));
+  assert.equal(saved.settings.high_autonomy, true);
+  assert.equal(saved.events.find(item => item.id === f.event.id).corrected, true);
+  assert.equal(saved.sessions['session-private'].included, false);
+  assert.equal(saved.growth.pending, null);
+  assert.equal(saved.personality.revision, 2);
+  assert.equal(saved.tasks.find(item => item.id === f.task.id).status, 'deferred');
 });
 
 test('free prose is normalized before first pairing without requiring labeled fields', async (t) => {
