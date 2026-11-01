@@ -9,6 +9,7 @@ import { RegistrationBridge, readSoul, platformUrl } from '../lib/core.js';
 import plugin, { Config, apply } from '../lib/index.js';
 import { registerCompanionTool } from '../lib/companion-tool.js';
 import { CompanionMind } from '../lib/companion-mind.js';
+import { CommunityRuntime } from '../lib/runtime.js';
 
 const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
 const SOUL = '# SOUL\n\n## 身份\n- **名字**：测试岛风\n- **角色**：秘书舰\n\n## 性格特质\n- 活泼、细心\n\n## 沟通风格\n- **语言**：中文\n\n## 边界\n- 未授权不发帖\n';
@@ -314,6 +315,30 @@ test('life mutation routes require same-origin UI headers and the displayed curr
   const invalid = await web.post({ ...input, settings: { budget: 9999 } });
   assert.equal(invalid.status, 409); assert.equal((await invalid.json()).error.code, 'life_settings_invalid');
   assert.equal(readFileSync(f.lifeFile, 'utf8'), before);
+});
+
+test('authenticated budget route saves remaining calls and accepts hot changes without starting work', async t => {
+  const original = CommunityRuntime.prototype.configureOptions;
+  let runtime;
+  t.mock.method(CommunityRuntime.prototype, 'configureOptions', function(input) { runtime = this; return original.call(this, input); });
+  const f = await lifeFixture(t), web = await registrationWeb(t, f);
+  const input = { action: 'runtime_settings', ...f.guard, expected_revision: 0,
+    settings: { remaining_model_calls: 1000, interval_seconds: 15 } };
+  let response = await web.post(input);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).runtime.options.remaining_model_calls, 1000);
+  assert.equal(runtime.running(), false);
+  const restore = t.mock.method(runtime, 'running', () => true);
+  response = await web.post({ ...input, expected_revision: 1, settings: { remaining_model_calls: 5 } });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).runtime.options.remaining_model_calls, 5);
+  restore.mock.restore();
+  const get = await web.fetch(web.endpoint, { headers: { cookie: 'dsh-test-cookie=authorized' } });
+  assert.equal((await get.json()).runtime.options.remaining_model_calls, 5);
+  const foreign = await web.post({ ...input, expected_actor_id: 'another-ai' });
+  assert.equal(foreign.status, 409);
+  assert.equal((await foreign.json()).error.code, 'runtime_identity_changed');
+  assert.equal(runtime.state.model_calls, 0);
 });
 
 test('authenticated life status, settings, explicit reviews, restoration, correction and session exclusion persist', async t => {

@@ -121,6 +121,63 @@ test('single reads public context, counts one queued reply, reports presence and
   assert.equal(f.remote.modelInputs[0].comments_page.has_more, true);
 });
 
+test('remaining budget saves 1000, survives reopening, and deducts the actual model attempt', async t => {
+  const f = fixture(t);
+  f.runtime.commit({ model_calls: 13 });
+  const save = runtime => runtime.configureOptions({ expected_actor_id: f.binding.actorId, expected_base_url: f.binding.baseUrl,
+    expected_revision: runtime.optionsStatus().revision, settings: { remaining_model_calls: 1000, interval_seconds: 15 } });
+  save(f.runtime);
+  assert.equal(f.runtime.state.model_calls, 13);
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 1000);
+  const reopened = f.make();
+  assert.equal(reopened.optionsStatus().remaining_model_calls, 1000);
+  assert.equal(reopened.optionsStatus().interval_seconds, 15);
+  reopened.start({ mode: 'single' }); await reopened.settled();
+  assert.equal(reopened.state.model_calls, 14);
+  assert.equal(reopened.optionsStatus().remaining_model_calls, 999);
+  assert.equal(f.make().optionsStatus().remaining_model_calls, 999);
+  assert.equal(f.remote.modelCalls, 1);
+});
+
+test('hot remaining-budget edits preserve the running call and apply before the next attempt', async t => {
+  let finish;
+  const f = fixture(t, { decide: () => new Promise(resolve => { finish = resolve; }) });
+  const setRemaining = value => f.runtime.configureOptions({ expected_actor_id: f.binding.actorId, expected_base_url: f.binding.baseUrl,
+    expected_revision: f.runtime.optionsStatus().revision, settings: { remaining_model_calls: value } });
+  setRemaining(2);
+  f.runtime.start({ mode: 'single' }); await until(() => f.remote.modelCalls === 1);
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 1);
+  const controller = f.runtime.abort;
+  setRemaining(5);
+  assert.equal(f.runtime.running(), true); assert.equal(controller.signal.aborted, false);
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 5);
+  f.runtime.configureOptions({ expected_actor_id: f.binding.actorId, expected_base_url: f.binding.baseUrl,
+    expected_revision: f.runtime.optionsStatus().revision, settings: { interval_seconds: 7 } });
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 5);
+  assert.equal(f.runtime.pollInterval, 7000);
+  setRemaining(0); finish({ participate: true, body: '当前这一轮正常完成。' }); await f.runtime.settled();
+  assert.equal(f.remote.submissions.length, 1); assert.equal(f.runtime.optionsStatus().remaining_model_calls, 0);
+  f.runtime.commit({ completed: [] });
+  f.runtime.start({ mode: 'single' }); await f.runtime.settled();
+  assert.equal(f.remote.modelCalls, 1);
+  assert.equal(f.make().optionsStatus().remaining_model_calls, 0);
+});
+
+test('budget writes reject stale or foreign settings and do not carry a budget into another AI', t => {
+  const f = fixture(t);
+  const input = { expected_actor_id: f.binding.actorId, expected_base_url: f.binding.baseUrl, expected_revision: 0,
+    settings: { remaining_model_calls: 1000 } };
+  assert.throws(() => f.runtime.configureOptions({ ...input, expected_actor_id: 'another-ai' }), /伙伴连接已变化/);
+  f.runtime.configureOptions(input);
+  assert.throws(() => f.runtime.configureOptions(input), /预算已在别处修改/);
+  assert.throws(() => f.runtime.configureOptions({ ...input, expected_revision: 1, settings: { remaining_model_calls: -1 } }), /剩余次数/);
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 1000);
+  f.binding.actorId = 'another-ai'; f.runtime.loadDisplayState();
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 10);
+  f.binding.actorId = 'ai-test'; f.runtime.loadDisplayState();
+  assert.equal(f.runtime.optionsStatus().remaining_model_calls, 1000);
+});
+
 test('old game identity no longer stops community observation after an origin or account switch', async t => {
   for (const actorId of ['ai-test', 'previous-ai']) await t.test(actorId, async child => {
     const f = fixture(child, { games: true, baseUrl: 'https://csiparty.natapp1.cc' });
@@ -220,7 +277,9 @@ test('an update waits for one reply, wakes a long observation interval and resto
   await until(() => f.runtime.updateParked);
   assert.equal(f.remote.submissions.length, 1); assert.equal(f.runtime.busyForUpdate(), false);
   const saved = f.runtime.updateContinuation();
-  assert.deepEqual(saved.options, options); assert.doesNotMatch(JSON.stringify(saved), /FAKE_RUNTIME_TOKEN|这次回复/);
+  const { max_model_calls, ...retained } = options;
+  assert.deepEqual(saved.options, { ...retained, remaining_model_calls: max_model_calls - 1 });
+  assert.doesNotMatch(JSON.stringify(saved), /FAKE_RUNTIME_TOKEN|这次回复/);
   f.runtime.stop('host_stopped'); await f.runtime.settled();
   const next = f.make();
   try {
