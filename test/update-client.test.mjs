@@ -162,6 +162,18 @@ test('development, unsupported hosts and dependency changes stay check-only', as
   }
 });
 
+test('update retries explain the bounded automatic schedule and the no-agent recovery entry', async () => {
+  const waiting=await renderUpdatePanel({state:'available',reason:'retry_wait',error:'installer_build_policy',canInstall:true});
+  assert.match(visibleText(waiting.tree),/一小时.*三次/);
+  assert.match(visibleText(waiting.tree),/无需让 AI 重新安装/);
+  const manual=await renderUpdatePanel({state:'available',reason:'retry_wait',auto:false,error:'installer_network',canInstall:true});
+  assert.match(visibleText(manual.tree),/自动更新已关闭/);
+  assert.doesNotMatch(visibleText(manual.tree),/会按一小时间隔自动重试/);
+  const stopped=await renderUpdatePanel({state:'error',reason:'retry_exhausted',blockedVersion:'0.4.2',error:'installer_network',canInstall:false});
+  assert.match(visibleText(stopped.tree),/已尝试三次/);
+  assert.match(visibleText(stopped.tree),/重新检查并重试/);
+});
+
 test('packaged DSH installation failures explain their actual cause without claiming development source', async t => {
   const reasons = {
     'host-unavailable': /更新环境|运行环境|宿主.*信息/,

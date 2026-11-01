@@ -7,6 +7,7 @@ import { GameRuntime, GAME_PROTOCOL } from '../lib/game-runtime.js';
 import { setupUpdates } from '../lib/update-integration.js';
 import { updateProfileKey } from '../lib/update-host.js';
 import { apply } from '../lib/index.js';
+import { updateHostError } from '../lib/update-diagnostics.js';
 
 const delay = ms => new Promise(done => setTimeout(done, ms));
 async function until(check) { for (let n = 0; n < 400; n++) { if (check()) return; await delay(5); } throw new Error('boundary timeout'); }
@@ -74,7 +75,7 @@ function fixture(t, { game = false, reflection } = {}) {
         assert.equal(runtime.busyForUpdate(), false);
         assert.equal(current.updates.gate.locked, true); return {};
       },
-      async install() { remote.installs++; if (remote.failInstall) throw new Error('fixture install failure'); activeVersion = version; if (remote.restart) return { restartRequired: true }; },
+      async install() { remote.installs++; if (remote.failInstall) throw remote.installError || new Error('fixture install failure'); activeVersion = version; if (remote.restart) return { restartRequired: true }; },
       async activate() {
         const old = current;
         old.runtime.stop('host_stopped'); await old.runtime.settled();
@@ -121,6 +122,22 @@ test('actual runtime is transferred across HMR only after verification; continua
   const saved = readFileSync(join(f.root, 'plugin-update.json'), 'utf8');
   assert.doesNotMatch(saved, /FAKE_LOCAL_ONLY|测试人设/); assert.equal(JSON.parse(saved).continuation, null);
   f.coordinator().reconcile(); assert.equal(f.remote.acquired, 2);
+});
+
+test('an unchanged rejected install resumes continuous observation and keeps its budget during the retry cooldown', async t => {
+  const f=fixture(t),first=f.current();
+  first.runtime.start({mode:'watch',interval_seconds:3600,max_model_calls:31});
+  await until(()=>first.runtime.detail==='waiting');
+  f.remote.failInstall=true;
+  f.remote.installError=Object.assign(updateHostError('installer_build_policy'),{skipRollback:true,installationUnchanged:true});
+  await f.check();await f.install();await until(()=>first.runtime.updateParked);await f.tick();
+  await until(()=>first.runtime.detail==='waiting'&&!first.runtime.updateParked);
+  assert.equal(f.current(),first,'no unnecessary activation or rollback replaces the old runtime');
+  assert.equal(first.runtime.limits.max_model_calls,31);
+  assert.equal(first.updates.status().reason,'retry_wait');
+  assert.equal(first.updates.status().resumeState,'resumed');
+  assert.equal(f.remote.installs,1);assert.equal(first.runtime.state.model_calls,0);
+  await f.tick();assert.equal(f.remote.installs,1);
 });
 
 test('a whole game finishes before updating, and its not-yet-started reflection runs in the new runtime', async t => {
