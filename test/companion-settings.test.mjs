@@ -83,7 +83,7 @@ function fixture(t, { game = false, accept = false, preferences = {}, gameDecisi
         return { ok: false, status: failure.status, json: async () => ({ error: { code: failure.code } }) };
       }
       return send({ protocol: 'carbon-silicon.turn-game.v1', room: { ...room }, seq: 1, server_time: new Date().toISOString(), observation: {}, rules: {}, result: room.status === 'finished' ? { completed: true } : null,
-        action_request: room.status === 'playing' ? { request_id: remote.gameRequestId || 'turn-1', based_on_revision: 1, deadline_at: new Date(Date.now() + 35000).toISOString(), legal_actions: [{ action_id: 'pass' }] } : null });
+        action_request: room.status === 'playing' ? { request_id: remote.gameRequestId || 'turn-1', based_on_revision: 1, deadline_at: new Date(Date.now() + 35000).toISOString(), legal_actions: [{ action_id: 'pass' }, { action_id: 'call' }] } : null });
     }
     if (path === '/api/v1/game-rooms/room-test/actions') { room.status = 'finished'; return send({ status: 'accepted', request_id: 'turn-1' }); }
     return no();

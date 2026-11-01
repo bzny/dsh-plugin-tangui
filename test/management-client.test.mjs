@@ -58,6 +58,43 @@ const button = (tree, label) => find(tree, n => n.type === 'button' && text(n) =
 const fixture = () => ({ managementSession: { sessionId: null }, binding: { actorName: '测试伙伴' }, modelLogs: [],
   runtime: { state: 'stopped', running: false, model_calls: 2, replies: 1, posts: 0 } });
 
+test('game activity takes priority over community observation in the card and settings', async () => {
+  const state=fixture(); state.managementSession.sessionId='session-current'; state.runtime={...state.runtime,running:true,state:'observing',detail:'playing_game'};
+  const ui=page(state); ui.render(); let tree=await ui.settle();
+  assert.match(text(tree),/正在参加小游戏/); assert.doesNotMatch(text(tree),/正在观察社区/); ui.dispose();
+  const settings=page({...state,runtimeConnection:{}},'session-current',true,'settings.section'); settings.render(); tree=await settings.settle();
+  const panel=settings.mount(find(tree,n=>typeof n.type==='function'&&n.type.name==='RuntimePanel'));
+  assert.match(text(panel),/游戏中/); settings.dispose();
+});
+
+test('action timing UI labels unknown phases honestly and shows measured milliseconds', async () => {
+  const state={...fixture(),gameDiagnostics:{actions:[{request_id:'fixture-request',status:'accepted',timing:{decision_ms:1250}}]}};
+  const ui=page(state,'session-current',true,'settings.section'); ui.render(); const tree=await ui.settle();
+  const panel=ui.mount(find(tree,n=>typeof n.type==='function'&&n.type.name==='ModelCallsPanel'));
+  const timing=ui.mount(find(panel,n=>typeof n.type==='function'&&n.type.name==='GameActionTiming'));
+  assert.match(text(timing),/决策总耗时.*1\.250 秒/); assert.match(text(timing),/最近一次提交往返：未记录/); ui.dispose();
+});
+
+test('model log UI distinguishes uncached input, cache reads, total input and unknown counters', async () => {
+  const state={...fixture(),modelLogs:[{call_id:'fixture-call',purpose:'game_decision',event:'finished',phase:'completed',
+    time:'2026-11-01T00:00:00Z',input_tokens:100,cache_read_tokens:900,total_input_tokens:1000,output_tokens:20,reasoning_tokens:12,usage_consistent:false}]};
+  const ui=page(state,'session-current',true,'settings.section');ui.render();const tree=await ui.settle();
+  const panel=ui.mount(find(tree,n=>typeof n.type==='function'&&n.type.name==='ModelCallsPanel'));
+  assert.match(text(panel),/未缓存输入 100｜缓存读取 900｜缓存写入 未提供｜总输入 1000｜输出 20｜其中思考 12/);
+  assert.match(text(panel),/思考 token 属于输出的一部分，不重复相加/);
+  assert.match(text(panel),/用量计数不一致/);ui.dispose();
+});
+
+test('single-choice diagnostics show no model use instead of a fabricated thinking duration', async () => {
+  const state={...fixture(),gameDiagnostics:{actions:[{request_id:'single',status:'accepted',execution:'single_legal_action',timing:{submit_rtt_ms:12}}]}};
+  const ui=page(state,'session-current',true,'settings.section');ui.render();const tree=await ui.settle();
+  const panel=ui.mount(find(tree,n=>typeof n.type==='function'&&n.type.name==='ModelCallsPanel'));
+  const timing=ui.mount(find(panel,n=>typeof n.type==='function'&&n.type.name==='GameActionTiming'));
+  assert.match(text(timing),/唯一合法动作 · 直接执行 · 未调用模型、未扣模型次数/);
+  assert.match(text(timing),/模型连接准备（各次合计）：无需模型/);
+  assert.match(text(timing),/最近一次提交往返：0\.012 秒/);ui.dispose();
+});
+
 test('retrying card stays orange, shows attempt count, and does not call a recoverable attempt a terminal failure', async () => {
   const state = fixture(); state.managementSession.sessionId = 'session-current'; state.runtime.running = true; state.runtime.state = 'thinking';
   state.modelLogs = [{ call_id: '12345678-1234-4321-8123-123456789abc', purpose: 'community_reply', phase: 'waiting_retry', retry_status: 'scheduled', attempt: 1, max_attempts: 3, elapsed_ms: 100 }];

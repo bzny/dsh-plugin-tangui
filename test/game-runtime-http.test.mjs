@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { GameRuntime } from '../lib/game-runtime.js';
+import { GameRuntime, safeGameTiming } from '../lib/game-runtime.js';
 import { createDshGameDecider } from '../lib/game-model.js';
 
 const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
@@ -159,7 +159,7 @@ async function fixture(t, { decide = async () => ({ action_id: 'pass', commentar
     request(requestId = 'fixture-turn-1') {
       remote.room.status = 'playing';
       remote.request = { request_id: requestId, based_on_revision: 3, phase: 'response',
-        deadline_at: ISO(time + 35000), legal_actions: [{ action_id: 'pass', type: 'pass' }],
+        deadline_at: ISO(time + 35000), legal_actions: [{ action_id: 'pass', type: 'pass' }, { action_id: 'call', type: 'pon' }],
         default_action: { action_id: 'pass' } };
       return remote.request;
     },
@@ -188,6 +188,97 @@ async function settle(f, predicate) {
   }
   assert.equal(Boolean(predicate()), true, 'runtime did not reach the expected isolated state');
 }
+
+test('server-resolved forced action needs no client model, budget reservation or invented thoughts', async t => {
+  const f=await fixture(t);await connect(f,1);await ready(f);
+  const request=f.request();f.remote.request=null; // Common server preflight has consumed the action.
+  const game=f.runtime;
+  game.journal(f.remote.room).modelCalls=1;game.save(); // Already at the model budget.
+  let reservations=0;
+  const owner={instanceId:f.bridge.state.instanceId,lease:game.lease,abort:new AbortController(),connectionReady:async()=>{},
+    checkActive(){assert.ok(game.monotonic()<this.lease.deadline);},
+    proof(){this.checkActive();return {'X-AI-Instance-ID':this.instanceId,'X-AI-Control-Epoch':String(this.lease.epoch)};},
+    reserveGameModelCall(){reservations++;throw Error('must not reserve a model call');}};
+  game.sessionOwner=owner;game.ownerAbort=()=>game.abort.abort();
+  await game.step();
+  assert.equal(f.remote.actions.size,0);assert.equal(f.modelCalls.length,0);assert.equal(reservations,0);
+  assert.equal(f.saved().journals['fixture-room'].modelCalls,1);assert.equal(game.active,null);
+  assert.equal(f.saved().journals['fixture-room'].requests[request.request_id],undefined);
+  assert.equal(game.status().last_model_call,null);assert.deepEqual(game.status().action_timings,[]);
+  await game.step();assert.equal(f.remote.actions.size,0);
+});
+
+test('distinct legal actions still require the model even if they have the same type and tile', async t => {
+  const f=await fixture(t,{decide:async()=>({action_id:'option-a'})});await connect(f);await ready(f);
+  const req=f.request();req.legal_actions=[{action_id:'option-a',type:'discard',tile_id:'same'},{action_id:'option-b',type:'discard',tile_id:'same'}];
+  await settle(f,()=>f.remote.actions.size===1);
+  assert.equal(f.modelCalls.length,1);assert.equal(f.saved().journals['fixture-room'].modelCalls,1);
+  assert.equal(f.saved().journals['fixture-room'].requests[req.request_id].execution,'model');
+});
+
+test('unique-choice requests cannot submit after expiry or a local stop during preparation', async t => {
+  for(const reason of ['expired','stopped'])await t.test(reason,async child=>{
+    const f=await fixture(child);await connect(f);await ready(f);const req=f.request();req.legal_actions=[{action_id:'pass'}];
+    if(reason==='expired'){
+      const api=f.runtime.api.bind(f.runtime);f.runtime.api=async(...args)=>{const result=await api(...args);if(args[0].endsWith('/state'))f.advance(35000);return result;};
+    } else {
+      const prepare=f.runtime.prepare.bind(f.runtime);f.runtime.prepare=async(...args)=>{await prepare(...args);await f.runtime.stop();};
+    }
+    await f.runtime.step();assert.equal(f.remote.actions.size,0);assert.equal(f.modelCalls.length,0);
+    assert.equal(f.saved().journals['fixture-room'].modelCalls,0);
+    assert.equal(f.saved().journals['fixture-room'].requests[req.request_id],undefined);
+  });
+});
+
+test('an old server unique request uses the ordinary model and reuses a lost-response submission after restart', async t => {
+  const f=await fixture(t);await connect(f);await ready(f);const req=f.request();req.legal_actions=[{action_id:'pass'}];
+  f.remote.dropActionResponse=true;await settle(f,()=>f.remote.actions.size===1);
+  assert.equal(f.remote.actions.size,1);assert.equal(f.modelCalls.length,1);
+  const original=f.saved().journals['fixture-room'].requests[req.request_id];assert.equal(original.status,'pending');
+  await f.runtime.stop();const restarted=f.restart('fixture-unique-restart');await restarted.start({maxModelCalls:5});
+  for(let i=0;i<5&&restarted.state.journals['fixture-room'].requests[req.request_id].status!=='accepted';i++)await restarted.step();
+  const final=f.saved().journals['fixture-room'].requests[req.request_id];
+  assert.equal(final.status,'accepted');assert.equal(final.key,original.key);assert.deepEqual(final.payload,original.payload);
+  assert.equal(f.remote.actions.size,1);assert.equal(f.modelCalls.length,1);assert.equal(f.saved().journals['fixture-room'].modelCalls,1);
+  const submissions=f.calls.filter(c=>c.path.endsWith('/actions'));assert.equal(submissions.length,2);
+  assert.equal(submissions[0].headers['idempotency-key'],submissions[1].headers['idempotency-key']);
+});
+
+test('action timings separate model, polling and HTTP costs without exposing decision text', async t => {
+  const f = await fixture(t); await connect(f); await ready(f);
+  const game = f.runtime, api = game.api.bind(game);
+  game.api = async (...args) => {
+    const value = await api(...args);
+    if (args[0].endsWith('/state')) f.advance(20);
+    if (args[0].endsWith('/actions')) f.advance(30);
+    return value;
+  };
+  game.decide = async (_snapshot, { onModelTiming }) => {
+    f.advance(1000); onModelTiming({model_prepare_ms:200,model_stream_ms:800,private_key:'PRIVATE'});
+    return {action_id:'pass',commentary:'PRIVATE_COMMENTARY',memory_note:'PRIVATE_MEMORY'};
+  };
+  f.request(); await game.step(); await game.active.promise;
+  f.advance(500); await game.step();
+  const row = game.status().action_timings[0];
+  assert.equal(row.status,'accepted');
+  assert.equal(row.timing.state_fetch_ms,20);
+  assert.equal(row.timing.decision_ms,1000);
+  assert.equal(row.timing.model_prepare_ms,200);
+  assert.equal(row.timing.model_stream_ms,800);
+  assert.equal(row.timing.result_to_submit_ms,520);
+  assert.equal(row.timing.submit_rtt_ms,30);
+  assert.equal(row.timing.total_ms,1550);
+  assert.doesNotMatch(JSON.stringify(game.status()),/PRIVATE_COMMENTARY|PRIVATE_MEMORY|PRIVATE_KEY|private_key/);
+  const restored = f.restart('fixture-new-process'); restored.state.roomId='fixture-room';
+  assert.deepEqual(restored.status().action_timings[0],row);
+  assert.equal(f.remote.actions.size,1);
+});
+
+test('timing fields reject non-numeric and private additions rather than inventing zero', () => {
+  assert.deepEqual(safeGameTiming({decision_ms:NaN,submit_rtt_ms:-1,total_ms:'12',receipt_at:'invalid',commentary:'PRIVATE'}),{});
+  assert.deepEqual(safeGameTiming({decision_ms:12.2}),{decision_ms:12});
+  assert.deepEqual(safeGameTiming(undefined),{});
+});
 
 test('game retries count every dispatch, submit one legal choice, and stop at the existing room budget', async t => {
   for (const validAfterFailure of [true, false]) {
@@ -321,7 +412,7 @@ test('explicit sanma variant passes three visible players and nuki through the g
   assert.equal(f.calls.find(call => call.path.endsWith('/ready')).body.rules_version, SANMA_RULES);
   const request = f.request('sanma-request');
   request.phase = 'self_turn';
-  request.legal_actions = [{ action_id: 'nuki-north-1', type: 'nuki', tile_id: 'north-1' }];
+  request.legal_actions = [{ action_id: 'nuki-north-1', type: 'nuki', tile_id: 'north-1' }, { action_id: 'discard-north-1', type: 'discard', tile_id: 'north-1' }];
   request.default_action = { action_id: 'nuki-north-1' };
   await settle(f, () => f.remote.actions.size === 1);
   await f.runtime.step();
