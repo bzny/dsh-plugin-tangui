@@ -120,6 +120,18 @@ function visibleText(node) {
   return (node?.children || []).map(visibleText).join(' ');
 }
 
+test('invalid settings explain the actual blocker and keep the explicit re-read entry available', async () => {
+  const { tree, calls } = await renderUpdatePanel({ mode: 'managed', state: 'available', reason: 'auto_disabled',
+    auto: false, canInstall: false, storageError: 'update_settings_invalid', storageDiagnostic: { stage: 'read', code: 'invalid_json' } });
+  assert.match(visibleText(tree), /修正后点击.*检查更新.*重新读取/);
+  assert.match(visibleText(tree), /JSON.*无法解析/);
+  assert.doesNotMatch(visibleText(tree), /但当前不能通过此入口安装/);
+  assert.equal(immediateUpdate(tree), null);
+  const check = find(tree, node => node.type === 'button' && node.children.includes('检查更新'));
+  assert.equal(check.props.disabled, false); check.props.onClick();
+  assert.deepEqual(calls, [{ action: 'update_check' }]);
+});
+
 test('manual update submits the displayed immutable candidate even with automatic updates off', async () => {
   const { tree, calls, state } = await renderUpdatePanel({ auto: false, reason: 'auto_disabled' });
   const button = immediateUpdate(tree);
