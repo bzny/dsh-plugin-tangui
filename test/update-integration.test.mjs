@@ -5,6 +5,86 @@ import { join, resolve, sep } from 'node:path';
 import { setupUpdates } from '../lib/update-integration.js';
 import { updateProfileKey } from '../lib/update-host.js';
 
+async function withStorageState(contents, run) {
+  const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'update-storage-')), disposers = [], diagnostics = [];
+  const file = join(root, 'plugin-update.json'); writeFileSync(file, contents);
+  const key = updateProfileKey(root), shared = globalThis[Symbol.for('dsh-plugin-tangui.update-coordinators.v1')];
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ draft: false, prerelease: false, tag_name: 'v0.0.0' }));
+  try {
+    const updates = setupUpdates({ effect(setup) { disposers.push(setup()); } }, {
+      stateFile: join(root, 'state.json'), isBusy: () => false, diagnostic: row => diagnostics.push(row),
+    });
+    updates.ready();
+    await run({ updates, file, diagnostics, coordinator: shared.get(key) });
+  } finally {
+    globalThis.fetch = nativeFetch;
+    disposers.forEach(dispose => dispose()); shared.delete(key);
+    assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
+  }
+}
+
+test('a UTF-8 BOM does not invalidate otherwise valid updater settings', async () => {
+  await withStorageState('\uFEFF' + JSON.stringify({ auto: true }), async ({ updates, file }) => {
+    assert.equal(updates.status().storageError, null);
+    assert.equal(updates.status().auto, true);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).auto, true);
+  });
+});
+
+test('manual check reloads a repaired settings file without resetting durable failure history or enabling auto', async () => {
+  await withStorageState('PRIVATE_INVALID_JSON', async ({ updates, file, coordinator, diagnostics }) => {
+    assert.equal(updates.status().storageError, 'update_settings_invalid');
+    assert.equal(readFileSync(file, 'utf8'), 'PRIVATE_INVALID_JSON');
+    writeFileSync(file, JSON.stringify({ auto: true, blockedVersion: '99.0.0',
+      retry: { version: '99.0.0', commit: 'a'.repeat(40), attempts: 2, nextAt: Date.now() + 3600000 } }));
+    let calls = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({ draft: false, prerelease: false, tag_name: `v${updates.status().current}` })); };
+    try {
+      updates.check(); await coordinator.manager._operation;
+    } finally { globalThis.fetch = original; }
+    assert.equal(calls, 1);
+    assert.equal(updates.status().storageError, null);
+    assert.equal(updates.status().auto, false, 'repair does not silently re-enable automatic installation');
+    assert.equal(updates.status().blockedVersion, '99.0.0');
+    assert.equal(updates.status().retry.attempts, 2);
+    assert.equal(updates.status().current, JSON.parse(readFileSync(file, 'utf8')).current);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_INVALID_JSON|update-storage-|state\.json/);
+  });
+});
+
+test('saving auto settings can recover a corrected file, while malformed files remain preserved', async () => {
+  await withStorageState('PRIVATE_INVALID_JSON', async ({ updates, file, diagnostics }) => {
+    assert.throws(() => updates.setAuto(true), /update_settings_invalid/);
+    assert.equal(readFileSync(file, 'utf8'), 'PRIVATE_INVALID_JSON');
+    assert.deepEqual(updates.status().storageDiagnostic, { stage: 'read', code: 'invalid_json' });
+    writeFileSync(file, JSON.stringify({ auto: false }));
+    updates.setAuto(true);
+    assert.equal(updates.status().storageError, null);
+    assert.equal(updates.status().storageDiagnostic, null);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).auto, true);
+    assert.ok(diagnostics.some(row => row.event === 'storage' && row.code === 'invalid_json'));
+    assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_INVALID_JSON/);
+  });
+});
+
+test('settings repair cannot claim an edited running version or revive a saved activity', async () => {
+  await withStorageState('PRIVATE_INVALID_JSON', async ({ updates, file, coordinator }) => {
+    const active = updates.status().current;
+    coordinator.continuation = null; coordinator.resumeState = null;
+    writeFileSync(file, JSON.stringify({ current: '99.0.0', auto: true,
+      continuation: { options: { mode: 'watch' } }, resumeState: 'pending' }));
+    updates.setAuto(false);
+    assert.equal(updates.status().current, active);
+    assert.equal(updates.status().auto, false);
+    assert.equal(coordinator.continuation, null);
+    assert.equal(coordinator.resumeState, null);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).current, active);
+  });
+});
+
 async function withScheduledUpdates(t, now, initialState, run, createAdapter) {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, 'update-schedule-')), disposers = [];

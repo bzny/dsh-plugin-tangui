@@ -1238,7 +1238,11 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
       }
 
       var primary = '';
-      if (manualError) {
+      if (update.storageError === 'update_settings_invalid') {
+        primary = '更新设置文件暂时无法读取，原文件保留。修正后点击“检查更新”重新读取，无需反复安装插件。';
+      } else if (update.storageError) {
+        primary = '更新设置未能保存，请检查本机目录权限后点击“检查更新”重试。';
+      } else if (manualError) {
         primary = errorMessages[errorCode];
       } else if (update.rollbackPending === true || reason === 'rollback_restart_required') {
         primary = '旧版已恢复到磁盘，需要重启才能重新生效；请在方便时通过原有启动器重启 DSH。';
@@ -1462,7 +1466,12 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
               )
             : null,
           update.storageError
-            ? h('p', { role: 'alert' }, '更新设置无法保存，原文件保留。')
+            ? h('p', { role: 'alert' }, update.storageDiagnostic?.code === 'invalid_json'
+                ? '具体原因：更新设置文件的 JSON 格式无法解析。'
+                : ['EACCES', 'EPERM'].includes(update.storageDiagnostic?.code)
+                  ? '具体原因：本机目录或文件访问被拒绝。'
+                  : update.storageDiagnostic?.code === 'ENOSPC' ? '具体原因：磁盘空间不足。'
+                    : '具体原因请查看程序日志中的 tangui:update；原文件保留。')
             : null
         )
       );

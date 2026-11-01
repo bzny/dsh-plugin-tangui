@@ -7,6 +7,29 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHostUpdateAdapter, scheduleOutsideProfileReload, updateProfileKey } from '../lib/update-host.js';
 import { setupUpdates } from '../lib/update-integration.js';
 
+test('adapter failures identify package inspection or module resolution without retaining exception text', () => {
+  const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'host-capability-diagnostic-'));
+  const packageRoot = join(root, 'node_modules', 'dsh-plugin-tangui'); mkdirSync(packageRoot, { recursive: true });
+  const file = join(root, 'package.json');
+  writeFileSync(file, JSON.stringify({ dependencies: { 'dsh-plugin-tangui': 'github:bzny/dsh-plugin-tangui#v0.5.20' } }));
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: 'dsh-plugin-tangui', version: '0.5.20' }));
+  const profile = { dir: root, installAnchor: undefined };
+  const ctx = { get: name => name === 'profileContext' ? profile : undefined };
+  try {
+    const unavailable = createHostUpdateAdapter(ctx, { packageRoot, reconcile: async () => ({}) });
+    assert.equal(unavailable.reason, 'installer-unavailable');
+    assert.deepEqual(unavailable.diagnostic, { stage: 'anchor', code: 'ERR_INVALID_ARG_VALUE' });
+    writeFileSync(file, 'PRIVATE_INVALID_JSON');
+    const malformed = createHostUpdateAdapter(ctx, { packageRoot });
+    assert.equal(malformed.reason, 'installation-unavailable');
+    assert.deepEqual(malformed.diagnostic, { stage: 'installation', code: 'invalid_json' });
+    assert.doesNotMatch(JSON.stringify(malformed.diagnostic), /PRIVATE|host-capability|package\.json/);
+  } finally {
+    assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
+  }
+});
+
 test('real Cordis asynchronous HMR startup does not permanently disable the official installer', async () => {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
   const profileDir = mkdtempSync(join(parent, 'cordis-update-startup-'));
