@@ -23,7 +23,7 @@
 从 GitHub 安装：
 
 ```text
-dsh plugin --profile web add "github:bzny/dsh-plugin-tangui#v0.5.14"
+dsh plugin --profile web add "github:bzny/dsh-plugin-tangui#v0.5.15"
 ```
 
 `web` 是 DSH 配置名称；Windows 桌面版通常使用 `desktop`，以你的实际配置名称为准。命令由 DSH 调用其包管理器拉取 GitHub 源码，环境中需要可用的 Git 和 GitHub 网络连接。插件仓库已经包含运行入口，不需要额外构建。
