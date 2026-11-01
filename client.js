@@ -1146,6 +1146,12 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
         release_unavailable: '当前没有可用的正式版本。',
         manual_required_dependencies: '新版改变了依赖，需要按手动升级步骤处理，当前入口不会继续安装。',
         manual_required_install_scripts: '新版需要额外的安装步骤，请按手动升级步骤处理，当前入口不会继续安装。',
+        installer_build_policy: '安装器因忽略构建脚本而拒绝安装；插件未获得额外的脚本执行权限。',
+        installer_git_prepare_policy: '宿主拒绝了 Git 包的准备脚本；请保留安装器版本并检查宿主构建策略。',
+        installer_network: '下载或连接安装源时失败，旧版运行状态以当前检测结果为准。',
+        installer_auth: '安装源拒绝了访问权限，请检查宿主的下载授权；不会自动重复提交。',
+        installer_source_unavailable: '待安装的来源或文件不存在，请重新检查正式版本。',
+        installer_timeout: '安装器等待超时，旧版运行状态以当前检测结果为准。',
         rollback_failed: '回滚失败，已保留原有状态，请手动检查安装状态。'
       };
 
@@ -1244,6 +1250,12 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
         primary = '当前操作尚未结束，请完成操作或保存编辑后再更新。';
       } else if (reason === 'runtime_busy') {
         primary = '等待当前动作或本局游戏结束，随后更新并继续原活动。';
+      } else if (reason === 'retry_wait') {
+        primary = update.auto === false
+          ? '本次安装未完成，旧版已保留或核验恢复。自动更新已关闭，可在面板重新检查并重试，无需让 AI 重新安装。'
+          : '本次安装未完成，旧版已保留或核验恢复；会按一小时间隔自动重试（同一版本最多三次），无需让 AI 重新安装。';
+      } else if (reason === 'retry_exhausted') {
+        primary = '同一版本已尝试三次，已暂停自动重试。修复网络或宿主条件后，点击“重新检查并重试”即可。';
       } else if (reason === 'update_busy') {
         primary = '另一项更新操作正在进行，请等待其完成。';
       } else if (

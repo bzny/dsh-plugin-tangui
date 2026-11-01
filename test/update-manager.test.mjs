@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UpdateManager, compareVersions, UPDATE_INTERVAL_MS, isUpdateQuietHours } from '../lib/update-manager.js';
+import { updateHostError } from '../lib/update-diagnostics.js';
 
 const commit = '1'.repeat(40), tagSha = '2'.repeat(40);
 const api = 'https://api.github.com/repos/bzny/dsh-plugin-tangui';
@@ -476,4 +477,57 @@ test('successful update keeps a bounded attempt with no failure', async () => {
     stage: 'verify', outcome: 'updated', failure: null, recoveryFailure: null,
     steps: ['snapshot', 'install', 'activate', 'verify'].map(stage => ({ stage, at: 100 })) });
   assert.deepEqual(host.calls, ['lock', 'snapshot', 'install', 'activate', 'version', 'release']);
+});
+
+test('unchanged build-policy refusal keeps the old runtime and retries after the hourly cooldown', async () => {
+  let now=100, fail=true;
+  const host=hostFixture(); const install=host.host.install;
+  host.host.install=async target=>{
+    if(fail){host.calls.push('install'); throw Object.assign(updateHostError('installer_build_policy',{pnpmCode:'ERR_PNPM_IGNORED_BUILDS',exitCode:1}),{skipRollback:true,installationUnchanged:true});}
+    return install(target);
+  };
+  const m=manager({...fixture(),host:host.host,now:()=>now});
+  let result=await m.check();
+  assert.equal(result.reason,'retry_wait'); assert.equal(result.blockedVersion,null);
+  assert.equal(result.retry.attempts,1); assert.equal(result.current,'0.4.0');
+  assert.ok(!host.calls.includes('restore')); assert.ok(!host.calls.includes('activate'));
+  for(let n=0;n<10;n++){now+=15000; await m.tick();}
+  assert.equal(host.calls.filter(x=>x==='install').length,1,'15-second ticks do not create repeated downloads');
+  fail=false; now=100+UPDATE_INTERVAL_MS;
+  result=await m.tick();
+  assert.equal(result.state,'updated'); assert.equal(result.retry,null);
+  assert.equal(host.calls.filter(x=>x==='install').length,2);
+});
+
+test('temporary installation failures stop after three attempts, including after reloading saved state', async () => {
+  let now=100;
+  const host=hostFixture({async install(){host.calls.push('install');throw Object.assign(updateHostError('installer_network',{code:'ECONNRESET'}),{skipRollback:true,installationUnchanged:true});}});
+  let m=manager({...fixture(),host:host.host,now:()=>now});
+  let result=await m.check();
+  for(let n=1;n<3;n++){
+    m=manager({...fixture(),host:host.host,now:()=>now,initialState:result});
+    await m.check({install:false});
+    await m.tick();
+    assert.equal(host.calls.filter(x=>x==='install').length,n);
+    now+=UPDATE_INTERVAL_MS;
+    result=await m.tick();
+  }
+  assert.equal(result.reason,'retry_exhausted'); assert.equal(result.blockedVersion,'0.4.1');
+  assert.equal(result.retry.attempts,3);
+  now+=UPDATE_INTERVAL_MS; await m.tick();
+  assert.equal(host.calls.filter(x=>x==='install').length,3);
+  await m.check({manual:true,install:false});
+  assert.equal(m.status().retry,null); assert.equal(m.status().blockedVersion,null);
+});
+
+test('a partially changed installation must complete verified rollback before an automatic retry is scheduled', async () => {
+  const host=hostFixture({async install(){host.calls.push('install');throw updateHostError('installer_network',{code:'ETIMEDOUT'});}});
+  const result=await manager({...fixture(),host:host.host}).check();
+  assert.equal(result.state,'rolled_back');assert.equal(result.reason,'retry_wait');
+  assert.equal(result.lastAttempt.outcome,'rolled_back');
+  assert.deepEqual(host.calls.slice(-4),['restore','activate','version','release']);
+  const broken=hostFixture({async install(){throw updateHostError('installer_network');},async restore(){throw Error('broken restore');}});
+  const failed=await manager({...fixture(),host:broken.host}).check();
+  assert.equal(failed.reason,'recovery_required');assert.equal(failed.retry,null);
+  assert.equal(failed.blockedVersion,'0.4.1');
 });

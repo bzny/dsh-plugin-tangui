@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { restoreUpdateAttempt, updateFailure, updateHostError } from '../lib/update-diagnostics.js';
+import { restoreUpdateAttempt, updateFailure, updateHostError, installerFailure } from '../lib/update-diagnostics.js';
 
 test('updater diagnostic values are allowlisted and never retain raw error properties', () => {
   for (const error of [Error('private endpoint'), { code: 'secret-code', updateDiagnosticCode: 'private-path', exitCode: 'secret' },
@@ -29,4 +29,19 @@ test('persisted diagnostics discard unknown fields and cap stage records', () =>
     assert.equal(restoreUpdateAttempt({ ...value, ...patch }), null);
   }
   assert.equal(restoreUpdateAttempt(undefined), null);
+});
+
+test('pnpm build-policy and network failures retain fixed codes but no upstream output', () => {
+  for (const [token, code] of [['ERR_PNPM_IGNORED_BUILDS','installer_build_policy'],
+    ['ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED','installer_git_prepare_policy'], ['ECONNRESET','installer_network']]) {
+    const diagnostic = updateFailure('install', installerFailure({exitCode:1, output:`private-path secret-token ${token}\nDone using pnpm v11.28.5`}));
+    assert.equal(diagnostic.code,code);
+    assert.equal(diagnostic.pnpmVersion,'11.28.5');
+    assert.equal(diagnostic.exitCode,1);
+    assert.doesNotMatch(JSON.stringify(diagnostic),/private|secret|output/);
+    const restored=restoreUpdateAttempt({from:'0.5.17',to:'0.5.18',startedAt:0,stage:'install',outcome:'error',failure:diagnostic});
+    assert.deepEqual(restored.failure,diagnostic);
+  }
+  assert.equal(updateFailure('install',installerFailure({exitCode:1,output:'ERR_PNPM_UNKNOWN_PRIVATE_ERROR'})).code,'installer_exit');
+  assert.equal(updateFailure('install',installerFailure({exitCode:1,output:'ERR_PNPM_FETCH_401 ERR_PNPM_META_FETCH_FAIL'})).code,'installer_auth');
 });

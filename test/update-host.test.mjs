@@ -101,6 +101,10 @@ test('host distinguishes installer errors and installed-file mismatch without pe
       await adapter.host.snapshot();
       await assert.rejects(adapter.host.install(target), error => {
         assert.equal(error.updateDiagnosticCode, expected);
+        if (expected !== 'installed_version_mismatch') {
+          assert.equal(error.installationUnchanged, true);
+          assert.equal(error.skipRollback, true);
+        }
         for (const [name, value] of Object.entries(details)) assert.equal(error[name], value);
         assert.doesNotMatch(JSON.stringify(error), /secret|private/);
         return true;
@@ -130,6 +134,7 @@ test('Git upgrades resolve the pinned commit, including after an explicitly name
         commands.push(args);
         const spec = args.at(-1), recovery = args.includes('--offline');
         assert.ok(args.includes('--ignore-scripts'));
+        assert.ok(args.includes('--config.strict-dep-builds=false'), 'ignored hooks never require granting persistent build permission');
         if (recovery) assert.match(spec, /^dsh-plugin-tangui@file:/);
         else assert.equal(spec, target.spec, 'an alias would let pnpm incorrectly keep the previous resolution');
         const pkg = JSON.parse(readFileSync(profileFile, 'utf8'));
@@ -150,4 +155,34 @@ test('Git upgrades resolve the pinned commit, including after an explicitly name
   } finally {
     assert.ok(root.startsWith(parent + sep)); rmSync(root, { recursive: true });
   }
+});
+
+test('a refused command skips recovery only when package, lockfile, workspace and all plugin files are unchanged', async () => {
+  const parent=resolve('.test-work');mkdirSync(parent,{recursive:true});
+  const root=mkdtempSync(join(parent,'host-unchanged-check-'));
+  const packageRoot=join(root,'node_modules','dsh-plugin-tangui');mkdirSync(join(packageRoot,'lib'),{recursive:true});
+  const profile=join(root,'package.json'),entry=join(packageRoot,'lib/index.js');
+  const initial=JSON.stringify({dependencies:{'dsh-plugin-tangui':'github:bzny/dsh-plugin-tangui#v0.5.17'}});
+  writeFileSync(profile,initial);
+  writeFileSync(join(packageRoot,'package.json'),JSON.stringify({name:'dsh-plugin-tangui',version:'0.5.17'}));
+  writeFileSync(join(packageRoot,'cordis.patch.yml'),'[]');
+  const ctx={get:name=>name==='profileContext'?{dir:root,installAnchor:profile}:undefined};
+  try{
+    for(const changed of [null,'package.json','pnpm-lock.yaml','pnpm-workspace.yaml','source']){
+      writeFileSync(profile,initial);writeFileSync(entry,'export function apply() {}');
+      writeFileSync(join(root,'pnpm-lock.yaml'),'lockfileVersion: 9\n');
+      writeFileSync(join(root,'pnpm-workspace.yaml'),'nodeLinker: hoisted\n');
+      const adapter=createHostUpdateAdapter(ctx,{packageRoot,reconcile:async()=>({}),withFileLock:(_p,run)=>run(),runProfilePnpm:async()=>{
+        if(changed) writeFileSync(changed==='source'?entry:join(root,changed),'changed-by-partial-install');
+        return {exitCode:1,output:'ERR_PNPM_IGNORED_BUILDS private-output'};
+      }});
+      await adapter.host.snapshot();
+      await assert.rejects(adapter.host.install({version:'0.5.18',commit:'b'.repeat(40),spec:'github:bzny/dsh-plugin-tangui#'+'b'.repeat(40)}),error=>{
+        assert.equal(error.updateDiagnosticCode,'installer_build_policy');
+        assert.equal(error.installationUnchanged===true,changed===null);
+        assert.equal(error.skipRollback===true,changed===null);
+        assert.doesNotMatch(JSON.stringify(error),/private-output/);return true;
+      });
+    }
+  }finally{assert.ok(root.startsWith(parent+sep));rmSync(root,{recursive:true});}
 });
