@@ -15,7 +15,7 @@ const PRIVATE_URL = `https://private.example/v1?api_key=${PRIVATE_KEY}`;
 const RAW_ERROR = `PRIVATE_UPSTREAM_ERROR ${PRIVATE_URL}`;
 const FIELDS = ['time', 'call_id', 'client', 'purpose', 'event', 'phase', 'model', 'provider', 'max_tokens',
   'timeout_ms', 'timeout_kind', 'deadline_remaining_ms', 'elapsed_ms', 'first_output_ms', 'text_characters', 'reasoning_characters',
-  'input_tokens', 'output_tokens', 'finish_kind', 'error_code', 'retry_group_id', 'attempt', 'max_attempts',
+  'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'total_input_tokens', 'total_tokens', 'reasoning_tokens', 'usage_consistent', 'finish_kind', 'error_code', 'retry_group_id', 'attempt', 'max_attempts',
   'validation_reason', 'validation_field', 'retry_status', 'retry_after_ms', 'failure_sample_id', 'reply_target_actor_id', 'reply_target_is_linked_human'].sort();
 const metadata = { purpose: 'community_reply', model: 'fixture-model', provider: 'fixture-provider', maxTokens: 64000, timeoutMs: 180000 };
 const delta = (text, index = 1, kind = 'text') => ({ type: `${kind}-delta`, index, text });
@@ -80,10 +80,56 @@ function historyRow(date, index, overrides = {}) {
     model: 'fixture-model', provider: 'fixture-provider', max_tokens: 64000, timeout_ms: 180000,
     timeout_kind: 'total_deadline', deadline_remaining_ms: null, elapsed_ms: 1200, first_output_ms: 50,
     text_characters: 100, reasoning_characters: 200, input_tokens: 80, output_tokens: 30,
+    cache_read_tokens: null, cache_write_tokens: null, total_input_tokens: null, total_tokens: null, reasoning_tokens: null, usage_consistent: null,
     finish_kind: 'stop', error_code: null, retry_group_id: null, attempt: null, max_attempts: null,
     validation_reason: null, validation_field: null, retry_status: null, retry_after_ms: null, failure_sample_id: null,
     reply_target_actor_id: null, reply_target_is_linked_human: null, ...overrides };
 }
+
+test('cache counts are disjoint cumulative snapshots and persist without recording content', t => {
+  const directory=isolatedDirectory(t), f=recorder();
+  const call=f.logger.start(metadata);
+  const usage={inputTokens:100,cacheReadTokens:900,cacheWriteTokens:40,outputTokens:20,totalTokens:1060,reasoningTokens:12,raw:PRIVATE_TEXT};
+  call.observe({type:'usage',usage});call.observe({type:'usage',usage});call.finish();
+  const last=f.entries.at(-1);
+  assert.equal(last.input_tokens,100);assert.equal(last.cache_read_tokens,900);assert.equal(last.cache_write_tokens,40);
+  assert.equal(last.total_input_tokens,1040);assert.equal(last.total_tokens,1060);
+  assert.equal(last.output_tokens,20);assert.equal(last.reasoning_tokens,12);assert.equal(last.usage_consistent,true);
+  assertSafe(f.entries);
+  writeFileSync(join(directory,'2026-10-28.jsonl'),JSON.stringify(last)+'\n','utf8');
+  assert.deepEqual(createModelCallLogger({directory}).recent(),[last]);
+});
+
+test('unknown cache counts stay null; exact provider totals can still give total input', () => {
+  for(const usage of [
+    {inputTokens:100,outputTokens:20},
+    {inputTokens:100,outputTokens:20,totalTokens:1020},
+    {inputTokens:100,cacheReadTokens:0,cacheWriteTokens:0,outputTokens:20},
+  ]){
+    const f=recorder(),call=f.logger.start(metadata);call.observe({type:'usage',usage});call.finish();
+    const last=f.entries.at(-1);
+    assert.equal(last.cache_read_tokens,usage.cacheReadTokens??null);
+    assert.equal(last.cache_write_tokens,usage.cacheWriteTokens??null);
+    assert.equal(last.reasoning_tokens,null);
+    assert.equal(last.total_input_tokens,usage.totalTokens?1000:usage.cacheReadTokens===0?100:null);
+  }
+});
+
+test('contradictory or invalid usage never fabricates a total input', () => {
+  for(const usage of [
+    {inputTokens:100,outputTokens:20,totalTokens:10},
+    {inputTokens:100,cacheReadTokens:900,cacheWriteTokens:0,outputTokens:20,totalTokens:120},
+    {inputTokens:100,cacheReadTokens:900,cacheWriteTokens:0,totalTokens:10},
+    {inputTokens:100,outputTokens:20,reasoningTokens:30},
+  ]){
+    const f=recorder(),call=f.logger.start(metadata);call.observe({type:'usage',usage});call.finish();
+    const last=f.entries.at(-1);assert.equal(last.total_input_tokens,null);assert.equal(last.usage_consistent,false);
+  }
+  const f=recorder(),call=f.logger.start(metadata);
+  call.observe({type:'usage',usage:{inputTokens:0.1,cacheReadTokens:PRIVATE_TEXT,cacheWriteTokens:-1,reasoningTokens:Infinity}});call.finish();
+  for(const field of ['input_tokens','cache_read_tokens','cache_write_tokens','reasoning_tokens','total_input_tokens'])assert.equal(f.entries.at(-1)[field],null);
+  assertSafe(f.entries);
+});
 
 test('old logs keep unknown recipients unknown while new recipient facts survive restart', t => {
   const directory = isolatedDirectory(t), date = '2026-10-28';
@@ -316,6 +362,19 @@ function fakeContext(result, { failure, cancel } = {}) {
     } } };
   return f;
 }
+
+test('game timing reports preparation and provider stream separately with the selected model unchanged', async () => {
+  let time=0; const timings=[];
+  const ctx={agentDefaultModel:{currentSelection:()=>({provider:'fixture',model:'chosen-model',reasoningEffort:'max'})},llm:{
+    async prepareCall(config){ assert.equal(config.model,'chosen-model');assert.equal(config.reasoningEffort,'max');assert.equal(config.maxTokens,64000);
+      time+=120;return {config,async *stream(){time+=880;yield delta('{"action_id":"pass"}');yield finish();}};}
+  }};
+  const decide=createDshGameDecider(ctx,{monotonic:()=>time,maxAttempts:1});
+  const result=await decide({action_request:{legal_actions:[{action_id:'pass'}]}},{deadline:35000,onModelTiming:v=>timings.push(v)});
+  assert.equal(result.action_id,'pass');assert.deepEqual(timings,[{model_prepare_ms:120,model_stream_ms:880}]);
+  const throwing=createDshGameDecider(ctx,{monotonic:()=>time,maxAttempts:1});
+  assert.equal((await throwing({action_request:{legal_actions:[{action_id:'pass'}]}},{deadline:35000,onModelTiming(){throw Error('diagnostic failed');}})).action_id,'pass');
+});
 
 test('all three adapters log successful calls at 64k without replacing runtime diagnostics', async t => {
   for (const spec of adapterCases) await t.test(spec.name, async () => {

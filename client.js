@@ -146,8 +146,9 @@ function activitySummary(state) {
   }
   const error = runtime.error?.message || state.runtimeConnection?.error?.message || state.error?.message || state.runtimeInitializationError || '';
   const reconnect = reconnectSummary(runtime);
+  const activity = runtime.running ? ({ playing_game: '正在参加小游戏', planning_game: '正在计划游戏', reflecting_game: '正在写赛后回想', writing_diary: '正在整理日记' }[runtime.detail]) : null;
   return {
-    runtime: runtime.stopping ? '社区正在停止' : reconnect ? [reconnect.label, reconnect.detail].filter(Boolean).join(' · ') : runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止',
+    runtime: runtime.stopping ? '社区正在停止' : reconnect ? [reconnect.label, reconnect.detail].filter(Boolean).join(' · ') : activity || (runtime.running ? ({ observing: '正在观察社区', thinking: '正在思考回复', submitting: '正在提交' }[runtime.state] || '社区运行中') : runtime.state === 'paused' ? '社区预算已用完' : '社区观察已停止'),
     runtimeTone: runtime.stopping ? 'gray' : reconnect ? 'orange' : runtime.running ? 'blue' : runtime.state === 'paused' ? 'orange' : 'gray',
     model: entry ? `${purpose} · ${stage}${Number.isFinite(entry.elapsed_ms) ? ` · ${(entry.elapsed_ms / 1000).toFixed(1)} 秒` : ''}${result ? ` · ${result}` : ''}` : '尚无模型调用记录',
     modelPrefix: entry ? `${purpose} · ` : '',
@@ -1450,6 +1451,18 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
       );
     }
 
+function GameActionTiming({ data }) {
+  if (!data?.actions?.length) return null;
+  const fields = [['state_fetch_ms','首次读取局面'],['before_decision_ms','本地准备'],['decision_ms','决策总耗时（含重试等待）'],['model_prepare_ms','模型连接准备（各次合计）'],['model_stream_ms','服务等待与输出（各次合计）'],['result_to_submit_ms','结果到提交（含轮询和复查）'],['submit_rtt_ms','最近一次提交往返'],['total_ms','收到局面至确认接受']];
+  return h('details', { style: { margin: '10px 0' } }, h('summary', null, '游戏动作耗时 · 最近 ', Math.min(data.actions.length,20), ' 步'),
+    h('p', null, '决策总耗时包含连接准备、服务商等待、输出及既有重试。模型连接准备与服务等待/输出是其分项，不重复相加。服务等待与输出不是纯思考时间；结果到提交包含轮询、读取最新局面及本地处理。唯一合法动作直接执行，不调用模型；未记录的旧阶段显示未记录，无法据此分离服务端排队和裁判耗时。'),
+    ...data.actions.slice(0,20).map(row=>h('div', { key: row.request_id, style: { borderTop: '1px solid #ddd', padding: '8px 0', overflowWrap: 'anywhere' } },
+      h('strong',null,`行动 ${row.request_id} · ${modelLogLabel(MODEL_LOG_OUTCOMES,row.status)||'处理中'}`),
+      row.execution === 'single_legal_action' && h('small', {style:{display:'block'}}, '唯一合法动作 · 直接执行 · 未调用模型、未扣模型次数'),
+      row.call_id && h('small', {style:{display:'block'}}, `关联最后一次模型调用：${row.call_id}`),
+      ...fields.map(([key,label])=>h('span',{key,style:{display:'inline-block',marginRight:'14px'}},`${label}：${row.execution==='single_legal_action'&&['decision_ms','model_prepare_ms','model_stream_ms'].includes(key)?'无需模型':Number.isFinite(row.timing?.[key])&&row.timing[key]>=0?(row.timing[key]/1000).toFixed(3)+' 秒':'未记录'}`)))));
+}
+
 function ModelCallsPanel({ state, action, busy }) {
   const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
   const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
@@ -1460,6 +1473,7 @@ function ModelCallsPanel({ state, action, busy }) {
     h('summary', null, '模型调用日志', logs.length ? ` · 最近 ${logs.length} 条阶段记录` : ' · 尚无调用记录'),
     h('p', { style: { fontSize: '14px' } }, '社区回应、人设整理和游戏决策都记录阶段与用量。模型生成完成不代表已发表或已执行游戏动作。完整日志保存在本机 model-logs 目录；常规日志不记录提示词、正文、思考原文或密钥。校验分类说明返回文本未通过检查的原因，校验字段只展示内置已知字段名。'),
     modelLogFailureSamplesCard(state, action, busy),
+    h(GameActionTiming, { data: state.gameDiagnostics }),
     ...outcomes.map(outcome => h('p', { key: outcome.call_id, style: { fontSize: '14px', overflowWrap: 'anywhere' } },
       `调用 ${outcome.call_id} 的处理结果：`, h('span', { className: `tangui-status-${outcome.reason === 'expired' ? 'red' : outcome.status === 'submitted' && state.runtime?.last_submission?.call_id === outcome.call_id && state.runtime?.last_submission?.status === 'queued' ? 'orange' : modelLogLabel(MODEL_LOG_OUTCOME_TONES, outcome.status) || 'gray'}` }, `${outcome.status === 'submitted' ? '服务已接收，发表状态见运行记录' : modelLogLabel(MODEL_LOG_OUTCOMES, outcome.status) || '查看运行记录'}${reasonLabels[outcome.reason] ? `（${reasonLabels[outcome.reason]}）` : ''}`))),
     ...logs.map((entry, index) => {
@@ -1475,6 +1489,9 @@ function ModelCallsPanel({ state, action, busy }) {
         entry.deadline_remaining_ms !== null && entry.deadline_remaining_ms !== undefined && h('p', null, `开始调用时，本回合还剩 ${seconds(entry.deadline_remaining_ms)}`),
         entry.first_output_ms !== null && entry.first_output_ms !== undefined && h('p', null, `首次收到正文或思考：${seconds(entry.first_output_ms)}`),
         entry.event === 'finished' && h('p', null, `输出额度 ${entry.max_tokens ?? '未知'} token · 已用 ${entry.output_tokens ?? '服务未提供'} token · 正文 ${entry.text_characters ?? '未知'} 字符 · 思考 ${entry.reasoning_characters ?? '未知'} 字符`),
+        entry.event === 'finished' && h('p', null, `Token：未缓存输入 ${entry.input_tokens ?? '未提供'}｜缓存读取 ${entry.cache_read_tokens ?? '未提供'}｜缓存写入 ${entry.cache_write_tokens ?? '未提供'}｜总输入 ${entry.total_input_tokens ?? '未提供'}｜输出 ${entry.output_tokens ?? '未提供'}｜其中思考 ${entry.reasoning_tokens ?? '未提供'}`),
+        entry.event === 'finished' && h('small', { style: { display: 'block' } }, '总输入含缓存；思考 token 属于输出的一部分，不重复相加。缺失计数不视为零。'),
+        entry.usage_consistent === false && h('p', { className: 'tangui-status-orange' }, '服务商返回的用量计数不一致，未推算总输入。'),
         validation && h('p', { className: 'tangui-status-orange', style: { margin: '5px 0' } }, validation),
         sampleId && h('p', { style: { margin: '5px 0', overflowWrap: 'anywhere' } }, `失败样本文件编号：${sampleId}（仅文件编号）`),
         entry.failure_sample_id !== null && entry.failure_sample_id !== undefined && !sampleId && h('p', { style: { margin: '5px 0' } }, '失败样本文件编号：未提供有效编号'),
@@ -1531,7 +1548,8 @@ function ModelCallsPanel({ state, action, busy }) {
       };
       const active = runtime.running || runtime.stopping;
       const reconnect = reconnectSummary(runtime);
-      const label = runtime.stopping ? '正在停止' : runtime.detail === 'plugin_updating' ? '更新间暂歇' : reconnect?.label || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
+      const activity = runtime.running ? ({ playing_game: '游戏中', planning_game: '计划游戏中', reflecting_game: '赛后回想中', writing_diary: '整理日记中' }[runtime.detail]) : null;
+      const label = runtime.stopping ? '正在停止' : runtime.detail === 'plugin_updating' ? '更新间暂歇' : reconnect?.label || activity || { stopped: '已停止', paused: '预算已用完', error: '需要处理', observing: '正在观察', thinking: '正在思考', submitting: '正在提交' }[runtime.state] || runtime.state;
       const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
         plugin_updating: '当前动作已结束，更新完成后继续原活动', writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', planning_game: '正在考虑本次游戏活动', reflecting_game: '正在写本场私人回想', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
