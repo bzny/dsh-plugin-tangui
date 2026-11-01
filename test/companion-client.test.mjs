@@ -65,6 +65,61 @@ const button = (ui, label) => ui.nodes(n => n.type === 'button' && textOf(n) ===
 const checkbox = (ui, label) => all(ui.nodes(n => n.type === 'label' && textOf(n).startsWith(label))[0], n => n.type === 'input')[0];
 const settingsSave = ui => button(ui, '保存相处设置');
 
+const budgetState = () => ({ ...lifeState(), runtimeConnection: { binding: { actorId: 'ai-a' } },
+  runtime: { state: 'observing', running: true, model_calls: 13, replies: 2, posts: 0,
+    options: { remaining_model_calls: 10, interval_seconds: 15, revision: 4 } } });
+const budgetInput = (ui, label) => all(ui.nodes(n => n.type === 'label' && textOf(n).startsWith(label))[0], n => n.type === 'input')[0];
+
+test('thoughts and life panels have distinct sibling keys on normalized community origins', async t => {
+  const state={...budgetState(),platformUrl:'https://community.example'};
+  const ui=harness('RuntimePanel',{state,action:()=>{}});t.after(()=>ui.dispose());
+  for(let i=0;i<5;i++){
+    const tree=ui.setProps({state:structuredClone(state),action:()=>{}});
+    const panels=tree.children.filter(node=>typeof node?.type==='function'&&['PartnerThoughts','CompanionLifePanel'].includes(node.type.name));
+    assert.equal(panels.length,2);assert.equal(new Set(panels.map(node=>node.props.key)).size,2);
+    await ui.flush();
+  }
+});
+
+test('runtime settings show saved remainder and permit hot saving without interrupting observation', async t => {
+  let state = budgetState(), ui;const actions=[];
+  const action = async payload => {
+    actions.push(payload);
+    state = { ...state, runtime: { ...state.runtime, options: { ...state.runtime.options, ...payload.settings, revision: 5 } } };
+    ui.setProps({ state, action }); return state;
+  };
+  ui = harness('RuntimePanel', { state, action });t.after(()=>ui.dispose());ui.render();await ui.flush();
+  assert.equal(budgetInput(ui, '剩余可调用次数').props.value, 10);
+  assert.equal(budgetInput(ui, '剩余可调用次数').props.disabled, false);
+  budgetInput(ui, '剩余可调用次数').props.onChange({target:{value:'1000'}});await ui.flush();
+  state = { ...state, runtime: { ...state.runtime, options: { ...state.runtime.options, remaining_model_calls: 9 } } };
+  ui.setProps({state,action});assert.equal(budgetInput(ui,'剩余可调用次数').props.value,1000);
+  button(ui,'保存本地预算').props.onClick();await ui.flush();
+  assert.equal(actions.length,1);assert.equal(actions[0].action,'runtime_settings');
+  assert.equal(actions[0].settings.remaining_model_calls,1000);assert.equal(actions[0].settings.interval_seconds,undefined);
+  assert.equal(actions[0].expected_revision,4);assert.equal(state.runtime.running,true);
+  assert.match(ui.text(),/已保存，将从下一次模型调用生效/);
+  assert.equal(budgetInput(ui,'剩余可调用次数').props.value,1000);
+  const reopened=harness('RuntimePanel',{state,action});t.after(()=>reopened.dispose());reopened.render();await reopened.flush();
+  assert.equal(budgetInput(reopened,'剩余可调用次数').props.value,1000);
+});
+
+test('editing interval never refills calls consumed during polling and failed saves retain the draft', async t => {
+  let state=budgetState();const actions=[];
+  const action=async payload=>{actions.push(payload);return undefined;};
+  const ui=harness('RuntimePanel',{state,action});t.after(()=>ui.dispose());ui.render();await ui.flush();
+  budgetInput(ui,'持续观察间隔').props.onChange({target:{value:'7'}});await ui.flush();
+  state={...state,runtime:{...state.runtime,options:{...state.runtime.options,remaining_model_calls:8}}};
+  ui.setProps({state,action});assert.equal(budgetInput(ui,'剩余可调用次数').props.value,8);
+  button(ui,'保存本地预算').props.onClick();await ui.flush();
+  assert.deepEqual(Object.keys(actions[0].settings),['interval_seconds']);assert.equal(actions[0].settings.interval_seconds,7);
+  assert.match(ui.text(),/未收到有效的保存回执/);assert.doesNotMatch(ui.text(),/已保存，将从下一次/);
+  assert.equal(budgetInput(ui,'持续观察间隔').props.value,7);
+  state={...state,binding:{actorId:'ai-b'},runtime:{...state.runtime,options:{remaining_model_calls:20,interval_seconds:12,revision:0}}};
+  ui.setProps({state,action});assert.equal(budgetInput(ui,'持续观察间隔').props.value,12);
+  assert.equal(budgetInput(ui,'剩余可调用次数').props.value,20);
+});
+
 test('life panel keeps private state hidden for absent or mismatched companion identity', t => {
   const state = lifeState(), ui = harness('CompanionLifePanel', { state, action: () => {} }); t.after(() => ui.dispose());
   ui.render(); assert.match(ui.text(), /今天想先私下聊一聊/);
