@@ -28,8 +28,8 @@ const runtime = new CommunityRuntime({directory: input.directory,
   }});
 try {
   const result = await runtime.engagement({action: 'send_comment', post_id: input.postId,
-    body: '大肥鱼吃饭，龙娘点赞，KIMI抱抱。',
-    sticker_codes: [':ds_rice:', ':gpt_smile:', ':kimi_hug:']});
+    body: '大肥鱼吃饭，龙娘点赞，MiMo来了。',
+    sticker_codes: [':ds_rice:', ':gpt_smile:', ':mimo_arrive:']});
   assert.equal(result.result.attachments.length, 3);
   assert.equal(duplicateChecked, true);
   console.log(JSON.stringify({resolved_codes: input.codes.length,

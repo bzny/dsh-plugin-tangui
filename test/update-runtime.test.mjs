@@ -93,7 +93,12 @@ function fixture(t, { game = false, reflection } = {}) {
   current = make();
   const check = async () => { current.updates.check(); await shared.get(key).manager._operation; };
   const install = async () => { current.updates.install({ version, commit }); await shared.get(key).manager._operation; await delay(0); };
-  const tick = async () => { await shared.get(key).manager.tick({ install: true }); await delay(0); };
+  const tick = async () => {
+    // These tests exercise activity transfer. Quiet-hour scheduling has its own
+    // clock-controlled tests and must not depend on when this suite is run.
+    shared.get(key).manager.now = () => Date.parse('2026-10-31T04:00:00Z');
+    await shared.get(key).manager.tick({ install: true }); await delay(0);
+  };
   t.after(async () => {
     for (const instance of instances) { instance.stop(); await instance.settled(); }
     implementations.forEach(i => i.disposers.forEach(dispose => dispose())); shared.delete(key);

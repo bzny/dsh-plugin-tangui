@@ -10,7 +10,7 @@ import { createDshGameDecider } from '../lib/game-model.js';
 import { createModelCallLogger, safeModelCallId } from '../lib/model-call-log.js';
 
 const CALL_ID = '12345678-1234-4321-8123-123456789abc';
-const response = { participate: true, body: 'fixture reply' };
+const response = { participate: true, reply_to_actor_id: 'human', body: 'fixture reply' };
 function isolatedDirectory(t) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.test-work');
   mkdirSync(root, { recursive: true });
@@ -107,6 +107,34 @@ test('community invalid output retries are charged durably and only one valid re
   assert.equal(f.submissions.length, 1); assert.equal(f.submissions[0].body.body, response.body);
   assert.equal(f.runtime.state.replies, 1);
   assert.equal(new Set(f.runtime.state.completed).size, f.runtime.state.completed.length);
+});
+
+test('wrong relationship address is retried before any public submission, with only actor ids in logs', async t => {
+  const logs = [];
+  const logger = createModelCallLogger({ directory: 'unused-identity-logger', makeDirectory() {},
+    setTimer: () => null, append(_path, line) { logs.push(JSON.parse(line)); } });
+  const model = retryModel([{ ...response, body: '阿宁你这标题真是太真实了。' }, response], { callLogger: logger });
+  const f = runtimeFixture(t, model.decide);
+  Object.assign(f.runtime.actor, { relationship: 'companion', linked_human_id: 'human-manager' });
+  const persona = { description: '只用于测试的人设。', effective: { manager_address: '称呼人类管理者为“阿宁”' } };
+  await f.runtime.decideOn('post-fixture', 'browse:post-fixture', null, null, persona);
+  assert.equal(model.calls, 2); assert.equal(f.runtime.state.model_calls, 2);
+  assert.equal(f.submissions.length, 1); assert.equal(f.submissions[0].body.body, response.body);
+  const finished = logs.filter(row => row.event === 'finished');
+  assert.equal(finished[0].validation_reason, 'manager_address_misuse');
+  assert.equal(finished[0].reply_target_actor_id, 'human');
+  assert.equal(finished[0].reply_target_is_linked_human, false);
+  assert.equal(finished[1].phase, 'completed');
+  assert.doesNotMatch(JSON.stringify(logs), /阿宁|只用于测试的人设/);
+});
+
+test('repeated recipient confusion exhausts the existing budgeted retries without publishing or recording a false experience', async t => {
+  const model = retryModel([{ ...response, reply_to_actor_id: 'human-manager' }]);
+  const f = runtimeFixture(t, model.decide);
+  await assert.rejects(f.invoke(), error => error.validation_reason === 'reply_target_mismatch' && error.attempts === 3);
+  assert.equal(model.calls, 3); assert.equal(f.runtime.state.model_calls, 3);
+  assert.equal(f.submissions.length, 0); assert.equal(f.runtime.state.pending, null);
+  assert.equal(f.runtime.diary.status().entry_count, 0);
 });
 
 test('community exhausted retries or budget write no reply, thought or read-completion', async t => {

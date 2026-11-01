@@ -16,7 +16,7 @@ const RAW_ERROR = `PRIVATE_UPSTREAM_ERROR ${PRIVATE_URL}`;
 const FIELDS = ['time', 'call_id', 'client', 'purpose', 'event', 'phase', 'model', 'provider', 'max_tokens',
   'timeout_ms', 'timeout_kind', 'deadline_remaining_ms', 'elapsed_ms', 'first_output_ms', 'text_characters', 'reasoning_characters',
   'input_tokens', 'output_tokens', 'finish_kind', 'error_code', 'retry_group_id', 'attempt', 'max_attempts',
-  'validation_reason', 'validation_field', 'retry_status', 'retry_after_ms', 'failure_sample_id'].sort();
+  'validation_reason', 'validation_field', 'retry_status', 'retry_after_ms', 'failure_sample_id', 'reply_target_actor_id', 'reply_target_is_linked_human'].sort();
 const metadata = { purpose: 'community_reply', model: 'fixture-model', provider: 'fixture-provider', maxTokens: 64000, timeoutMs: 180000 };
 const delta = (text, index = 1, kind = 'text') => ({ type: `${kind}-delta`, index, text });
 const finish = (kind = 'stop', code) => ({ type: 'finish', reason: { kind,
@@ -81,8 +81,21 @@ function historyRow(date, index, overrides = {}) {
     timeout_kind: 'total_deadline', deadline_remaining_ms: null, elapsed_ms: 1200, first_output_ms: 50,
     text_characters: 100, reasoning_characters: 200, input_tokens: 80, output_tokens: 30,
     finish_kind: 'stop', error_code: null, retry_group_id: null, attempt: null, max_attempts: null,
-    validation_reason: null, validation_field: null, retry_status: null, retry_after_ms: null, failure_sample_id: null, ...overrides };
+    validation_reason: null, validation_field: null, retry_status: null, retry_after_ms: null, failure_sample_id: null,
+    reply_target_actor_id: null, reply_target_is_linked_human: null, ...overrides };
 }
+
+test('old logs keep unknown recipients unknown while new recipient facts survive restart', t => {
+  const directory = isolatedDirectory(t), date = '2026-10-28';
+  const old = historyRow(date, 1); delete old.reply_target_actor_id; delete old.reply_target_is_linked_human;
+  const current = historyRow(date, 2, { reply_target_actor_id: 'human-community', reply_target_is_linked_human: false,
+    validation_reason: 'manager_address_misuse', validation_field: 'body' });
+  writeFileSync(join(directory, `${date}.jsonl`), [old, current].map(JSON.stringify).join('\n'), 'utf8');
+  const rows = createModelCallLogger({ directory }).recent();
+  assert.equal(rows[0].reply_target_actor_id, null); assert.equal(rows[0].reply_target_is_linked_human, null);
+  assert.equal(rows[1].reply_target_actor_id, 'human-community'); assert.equal(rows[1].reply_target_is_linked_human, false);
+  assert.equal(rows[1].validation_reason, 'manager_address_misuse');
+});
 
 test('history loading rebuilds fixed fields, drops invalid identity rows and sanitizes old contents again', t => {
   const directory = isolatedDirectory(t);

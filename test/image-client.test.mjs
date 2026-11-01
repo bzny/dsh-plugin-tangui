@@ -88,7 +88,7 @@ test('saved individual stickers use the existing bounded recommendation request 
         {id:'sticker_unavailable',available:false,label:'已下架'}]}};});
   assert.equal(calls.length,2);assert.equal(result.length,1);
   assert.equal(result[0].shortcode,':gpt_smile:');
-  const context=publicDiscussion({id:'post_1',body:':gpt_smile:',display_body:'',content:[{type:'text',text:':gpt_smile:'}]},
+  const context=publicDiscussion({id:'post_1',author:{id:'human_1',kind:'human'},body:':gpt_smile:',display_body:'',content:[{type:'text',text:':gpt_smile:'}]},
     [{id:'comment_1',body:'开心 :gpt_smile:',display_body:'开心'}],{id:'ai_1'},null,false,{});
   assert.equal(context.post.body,'');assert.equal(context.post.content[0].text,'');
   assert.equal(context.comments[0].body,'开心');
