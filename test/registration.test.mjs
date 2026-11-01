@@ -16,6 +16,7 @@ const SOUL = '# SOUL\n\n## 身份\n- **名字**：测试岛风\n- **角色**：�
 
 async function fixture(t, { complete = true, soul = SOUL, normalizer } = {}) {
   const root = join(TEST_ROOT, randomUUID());
+  const beforeCleanup = [];
   const memoryDir = join(root, 'memory');
   mkdirSync(join(memoryDir, 'user'), { recursive: true });
   writeFileSync(join(memoryDir, 'SOUL.md'), soul);
@@ -76,11 +77,14 @@ async function fixture(t, { complete = true, soul = SOUL, normalizer } = {}) {
   const options = { stateFile: join(root, 'state', 'state.json'), memoryDir, baseUrl, now: () => time, timeoutMs: 1500,
     normalizePersona: async (input) => { normalizationCalls.push(input); return (normalizer || deterministicNormalizer)(input); } };
   t.after(async () => {
-    await new Promise((done) => server.close(done));
-    assert.ok(resolve(root).startsWith(`${TEST_ROOT}\\`) || resolve(root).startsWith(`${TEST_ROOT}/`));
-    rmSync(root, { recursive: true });
+    try { for (const dispose of beforeCleanup) await dispose(); }
+    finally {
+      await new Promise((done) => server.close(done));
+      assert.ok(resolve(root).startsWith(`${TEST_ROOT}\\`) || resolve(root).startsWith(`${TEST_ROOT}/`));
+      rmSync(root, { recursive: true });
+    }
   });
-  return { bridge: new RegistrationBridge(options), options, remote, calls, memoryDir, normalizationCalls,
+  return { bridge: new RegistrationBridge(options), options, remote, calls, memoryDir, normalizationCalls, beforeCleanup,
     advance() { time += 6000; }, count(path) { return calls.filter((call) => call.path.endsWith(path)).length; } };
 }
 
@@ -93,9 +97,9 @@ async function registrationWeb(t, f) {
   let handler;
   const disposers = [], injections = [], nativeFetch = globalThis.fetch;
   const server = createServer((req, res) => { void handler(req, res); });
-  // Register cleanup before apply: a missing host service or failed setup must
-  // not strand the HTTP listener or the plugin's scheduled work.
-  t.after(async () => {
+  // Stop the plugin before fixture cleanup removes the directory its status
+  // reads. A missing host service must still close listeners and timers.
+  f.beforeCleanup.push(async () => {
     const cleanup = await Promise.allSettled(disposers.reverse().map(stop => Promise.resolve().then(() => stop?.())));
     await new Promise(done => server.close(done));
     for (const result of cleanup) if (result.status === 'rejected') throw result.reason;

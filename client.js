@@ -60,6 +60,11 @@ const MODEL_LOG_OUTCOME_TONES = { generating: 'blue', model_started: 'blue', mod
 const MODEL_LOG_RETRY_STATUS = { scheduled: '已安排重试', exhausted: '连续尝试后未完成', cancelled: '重试已取消', stopped: '重试已停止' };
 const MODEL_LOG_VALIDATION_REASONS = { empty_output: '返回内容为空，未得到可用输出', json_syntax: 'JSON 语法错误，无法解析返回内容', object_required: '返回内容的顶层必须是 JSON 对象', missing_field: '缺少必需字段', field_type: '字段类型不符合约定', field_length: '字段长度不符合要求', unknown_field: '返回了结构定义之外的字段', empty_reply: '回复正文为空', invalid_attachment: '附件格式或内容无效', invalid_sticker: '贴纸格式或内容无效', unsupported_output: '输出类型不受支持', schema_invalid: '输出未通过结构约束校验', invalid_choice: '选择值不在允许范围内', invalid_evidence: '证据引用无效或不符合要求', reply_target_mismatch: '回复对象与实际作者不一致', manager_address_misuse: '将管理者专属称呼用于其他账号' };
 const MODEL_LOG_VALIDATION_FIELDS = { participate: '是否回复', body: '正文', reflection: '回想', decision_note: '参与说明', attachments: '附件', sticker_codes: '表情代码', action_id: '游戏动作', commentary: '动作说明', memory_note: '私人短记', name: '名称', overrides: '人设属性', title: '标题', topics: '话题', source_ids: '来源编号', reply_to_actor_id: '回复对象' };
+Object.assign(MODEL_LOG_VALIDATION_FIELDS, { state: '游戏状态', baseline: '个人基线', goal: '小目标', note: '状态说明',
+  impressions: '同桌印象', 'impressions.actor_id': '同桌角色', 'impressions.impression': '同桌印象内容',
+  'impressions.evidence_id': '牌局依据编号', 'impressions.evidence_excerpt': '牌局依据原文',
+  next_activity: '下一活动', choice_index: '游戏选择', draft: '公开草稿', rest_minutes: '休息时长',
+  appraisal: '经历与状态表达', 'appraisal.growth': '成长建议', 'appraisal.contact': '主动联系建议', 'appraisal.profile': '初始性格解释' });
 function modelLogLabel(table, value) {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(table, value) ? table[value] : '';
 }

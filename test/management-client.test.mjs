@@ -122,6 +122,11 @@ test('failure sample toggle uses authenticated settings action while log card re
   const readOnly = ui.mount({ type: node.type, props: { state } }); assert.equal(find(readOnly, n => n.type === 'input'), null);
   state.modelLogs[0].validation_field = 'PRIVATE_UNKNOWN_FIELD';
   assert.doesNotMatch(text(ui.mount({ type: node.type, props: { state } })), /PRIVATE_UNKNOWN_FIELD/);
+  state.modelLogs[0].validation_field = 'appraisal.growth';
+  assert.match(text(ui.mount({ type: node.type, props: { state } })), /成长建议（appraisal\.growth）/);
+  state.modelLogs[0].validation_reason = 'invalid_evidence';
+  state.modelLogs[0].validation_field = 'impressions.evidence_excerpt';
+  assert.match(text(ui.mount({ type: node.type, props: { state } })), /牌局依据原文（impressions\.evidence_excerpt）/);
   ui.dispose();
 });
 
