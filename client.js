@@ -291,8 +291,8 @@ const PARTNER_THOUGHTS_CSS = `
 @media(max-width:420px){.tangui-thoughts-panel{padding:9px}.tangui-thoughts-controls{gap:6px}.tangui-thoughts-date{flex-basis:100%}}
 `;
 const MANAGEMENT_CARD_CSS = `
-.tangui-session-status{box-sizing:border-box;min-width:0;max-width:100%;max-height:min(54vh,460px);max-height:min(54dvh,460px);overflow:auto}
-.tangui-session-status *,.tangui-session-status *::before,.tangui-session-status *::after{box-sizing:border-box}
+.tangui-management-card{box-sizing:border-box;min-width:0;max-width:100%;max-height:min(54vh,460px);max-height:min(54dvh,460px);overflow:auto}
+.tangui-management-card *,.tangui-management-card *::before,.tangui-management-card *::after{box-sizing:border-box}
 .tangui-session-collapsed{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;white-space:nowrap}
 .tangui-session-collapsed-copy{display:flex;align-items:baseline;gap:6px;flex:1 1 auto;min-width:0;overflow:hidden}
 .tangui-session-collapsed-copy strong{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -301,11 +301,11 @@ const MANAGEMENT_CARD_CSS = `
 .tangui-session-expanded{min-width:0;max-width:100%}
 .tangui-session-header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
 .tangui-session-header-copy{display:flex;gap:8px;align-items:center;flex:1 1 auto;flex-wrap:wrap;min-width:0}
-.tangui-session-status.tangui-session-reading{display:flex;flex-direction:column;max-height:min(520px,calc(100vh - 180px));max-height:min(520px,calc(100dvh - 180px));overflow:hidden}
+.tangui-management-card.tangui-session-reading{display:flex;flex-direction:column;max-height:min(520px,calc(100vh - 180px));max-height:min(520px,calc(100dvh - 180px));overflow:hidden}
 .tangui-session-reading .tangui-session-expanded{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden}
 .tangui-session-reading .tangui-session-header{flex:0 0 auto}
 .tangui-session-reading .tangui-thoughts-head button,.tangui-session-reading .tangui-thoughts-controls button{min-height:32px;padding:4px 10px!important}
-@media(max-width:420px){.tangui-session-status{padding:8px!important}.tangui-session-header{gap:6px}.tangui-session-header-copy{gap:6px}}
+@media(max-width:420px){.tangui-management-card{padding:8px!important}.tangui-session-header{gap:6px}.tangui-session-header-copy{gap:6px}}
 `;
 function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed = false }) {
   const [openFor, setOpenFor] = React.useState(null);
@@ -542,7 +542,9 @@ function PartnerThoughts({ actorId, actorName, baseUrl, onOpenChange, collapsed 
         view && h('small', {style: {opacity: .75}},
           Number.isInteger(view.total) && view.total >= 0 ? `共 ${view.total} 条 · ` : '', `本页 ${view.items.length} 条`))),
     h('button', {
+      key: 'thoughts-toggle',
       ref: entryRef,
+      'data-tangui-thoughts-toggle': 'true',
       type: 'button',
       disabled: !origin || !actorId,
       'aria-expanded': open,
@@ -760,6 +762,37 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
   const taskLabels = { pending_approval:'待确认', deferred:'已安排', due:'已到提醒时间', completed:'已完成', cancelled:'已取消', rejected:'未采用' };
   const timeline = Array.isArray(companion.timeline) ? companion.timeline.slice(0, 10) : [];
   const sessions = Array.isArray(companion.sessions) ? companion.sessions : [];
+
+  if (compact) {
+    const compactStatus = [
+      companion.enabled === false ? '未启用' : companion.enabled === true ? '已启用' : '启用状态未提供',
+      companion.rest ? '正在休息' : '',
+      pendingGrowth ? '成长待确认' : '',
+      tasks.some(task => task.status === 'pending_approval') ? '待办待确认' : ''
+    ].filter(Boolean).join(' · ');
+    const compactTimeline = timeline.length ? timeline.map((event, index) =>
+      h('article', { className:'tangui-life-event', key:lifeHasId(event.id) ? String(event.id) : index },
+        h('div', { className:'tangui-life-meta' }, LIFE_SOURCES[event.source] || event.source || '来源未注明', ' · ', lifeWhen(event.at) || '时间未提供'),
+        h('p', null, event.summary || '尚无记录'),
+        event.reflection && h('p', null, '回顾：', event.reflection))
+    ) : h('p', { className:'tangui-life-muted' }, '尚无记录');
+    return h('section', { className:'tangui-life-panel tangui-life-compact', 'aria-busy':working },
+      h('style', null, COMPANION_LIFE_CSS),
+      h('div', { className:'tangui-life-head' }, h('span', { className:'tangui-life-icon', 'aria-hidden':'true' }, '🌱'), h('h3', null, '伙伴近况')),
+      h('details', { key:identityKey + ':details' }, h('summary', null, '详情'),
+        h('p', { className:'tangui-life-summary' }, summary || '尚无近况记录。'),
+        h('p', { className:'tangui-life-meta' }, updated ? `更新于 ${updated}（本机时区）` : '更新时间尚无记录'),
+        h('p', { className:'tangui-life-meta' }, compactStatus),
+        h('div', { className:'tangui-life-grid' },
+          h('div', { className:'tangui-life-cell' }, '心情：', lifeNumber(currentValues.mood)),
+          h('div', { className:'tangui-life-cell' }, '压力：', lifeNumber(currentValues.pressure)),
+          h('div', { className:'tangui-life-cell' }, '精力：', lifeNumber(currentValues.energy))),
+        companion.error && h('p', { role:'alert', className:'tangui-life-error' }, '伙伴近况暂时不完整，可刷新后再试。')),
+      h('details', { key:identityKey + ':timeline' },
+        h('summary', null, `近期经历${timeline.length ? `（${timeline.length}）` : ''}`), compactTimeline),
+      feedbackNode
+    );
+  }
 
   const timelineContent = timeline.length ? timeline.map((event, index) => {
     const hasId = lifeHasId(event.id);
@@ -994,7 +1027,7 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
       const smallButton = { ...buttonStyle, fontSize: '13px', padding: '4px 9px', marginBottom: 0 };
       return h('section', {
         'aria-label': '碳硅派对会话动态',
-        className: readingThoughts ? 'tangui-session-status tangui-session-reading' : 'tangui-session-status',
+        className: readingThoughts ? 'tangui-session-status tangui-management-card tangui-session-reading' : 'tangui-session-status tangui-management-card',
         style: { fontSize: '14px', lineHeight: 1.6, padding: '10px 12px', marginBottom: '8px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px', overflowWrap: 'anywhere' }
       },
         h('style', null, SESSION_STATUS_CSS),
@@ -1038,7 +1071,7 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
               here && h(DraftReviewReminder, { source: { pending_count: state.runtime?.draft_notices?.length || 0, review_link: state.runtime?.draft_notices?.[0]?.review_url } }),
               here && h(InboxReminder, { inbox: state.runtime?.inbox, platformUrl: state.platformUrl, onRefresh: refreshInbox, refreshLabel: inboxRefreshing ? '正在刷新…' : '刷新收件提醒' }),
               here && state.runtime?.draft_request && h('p', { role: 'status' }, '草稿已保存在本机，等待当前操作结束后提交；尚未发表。'),
-              here && state.binding && h(CompanionLifePanel, { key: bindingIdentity, state, action: lifeAction, busy, compact: true }),
+
               here && summary && h('div', null,
                 h('p', { style: { margin: '5px 0' } }, state.binding ? `已绑定 ${state.binding.actorName || 'AI伙伴'} · ` : '尚未绑定社区 · ', h('span', { className: `tangui-status-${summary.runtimeTone}` }, summary.runtime)),
                 h('p', { role: 'status', 'aria-live': 'polite', style: { margin: '5px 0' } },
@@ -1051,7 +1084,8 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
                 h('details', null, h('summary', { style: { cursor: 'pointer' } }, '展开运行与模型记录'),
                   h('p', null, `累计模型调用 ${state.runtime?.model_calls ?? 0} 次 · 已接收回复 ${state.runtime?.replies ?? 0} 条 · 主动发帖 ${state.runtime?.posts ?? 0} 篇`),
                   h('div', { style: { maxHeight: 'min(40vh, 380px)', overflowY: 'auto' } }, h(ModelCallsPanel, { state }))),
-                h('small', { style: { opacity: .7 } }, '每 5 秒刷新 · 只展示状态，不触发 AI 回复'))),
+                h('small', { style: { opacity: .7 } }, '每 5 秒刷新 · 只展示状态，不触发 AI 回复')),
+              here && state.binding && h(CompanionLifePanel, { key: bindingIdentity, state, action: lifeAction, busy, compact: true })),
             state?.binding && h(PartnerThoughts, {
               key: bindingIdentity,
               actorId: state.binding.actorId,
@@ -1450,7 +1484,6 @@ function ModelCallsPanel({ state, action, busy }) {
 
     function RuntimePanel({ state, action, lifeAction, busy }) {
       busy = busy || state.updates?.state === 'installing';
-      const [options, setOptions] = React.useState({ max_model_calls: 10, interval_seconds: 15 });
       const [diaryContent, setDiaryContent] = React.useState(null);
       const [draft, setDraft] = React.useState(() => loadDraft('post', state) || { title: '', body: '', topics: [] });
       const seenRejection = React.useRef(loadDraft('post', state) ? state.runtime?.rejected_draft?.key : null);
@@ -1458,8 +1491,25 @@ function ModelCallsPanel({ state, action, busy }) {
       const [until, setUntil] = React.useState('');
       const [format, setFormat] = React.useState('json');
       const [exportPage, setExportPage] = React.useState(null);
-      useUpdateHold(!!(draft.title || draft.body || draft.topics.length));
+      const [budgetDraft, setBudgetDraft] = React.useState({ identity: null, revision: undefined, values: {} });
+      const [budgetFeedback, setBudgetFeedback] = React.useState(null);
+      const [budgetSaving, setBudgetSaving] = React.useState(false);
+      const budgetSavingRef = React.useRef(false), budgetBaselineRef = React.useRef(null);
       const runtime = state.runtime, connection = state.runtimeConnection;
+      const budgetOrigin = lifeOrigin(state.platformUrl) || '';
+      const budgetIdentity = state.binding ? `${budgetOrigin}|${state.binding.actorId}` : null;
+      const savedBudget = runtime?.options, budgetRevision = savedBudget?.revision;
+      const budgetEdits = budgetDraft.identity === budgetIdentity && Object.is(budgetDraft.revision, budgetRevision) ? budgetDraft.values : {};
+      const hasBudgetEdits = Object.keys(budgetEdits).length > 0;
+      useUpdateHold(!!(draft.title || draft.body || draft.topics.length || hasBudgetEdits));
+      React.useEffect(() => {
+        const previous = budgetBaselineRef.current;
+        const revised = previous && previous.identity === budgetIdentity && previous.revision !== budgetRevision;
+        budgetBaselineRef.current = { identity: budgetIdentity, revision: budgetRevision };
+        setBudgetDraft({ identity: budgetIdentity, revision: budgetRevision, values: {} });
+        if (revised && budgetDraft.identity === budgetIdentity && Object.keys(budgetDraft.values).length) setBudgetFeedback({ identity: budgetIdentity, text: '本地运行参数已更新，请重新编辑未保存内容。' });
+        else if (previous?.identity !== budgetIdentity) setBudgetFeedback(null);
+      }, [budgetIdentity, budgetRevision]);
       React.useEffect(() => {
         if (runtime?.rejected_draft && runtime.rejected_draft.key !== seenRejection.current) {
           seenRejection.current = runtime.rejected_draft.key;
@@ -1490,8 +1540,35 @@ function ModelCallsPanel({ state, action, busy }) {
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
         cycle_complete: '本轮检查结束', user_stopped: '已按要求停止', budget_exhausted: '可提高累计预算后继续', request_failed: '请查看下方原因', not_started: '尚未启动' }[runtime.detail] || runtime.detail;
       const button = (text, payload, disabled = false) => h('button', { type: 'button', style: buttonStyle, disabled: busy || disabled, onClick: () => void action(payload) }, text);
-      const field = (text, value, update, type = 'text') => h('label', { style: { display: 'block', margin: '10px 0' } }, text,
-        h('input', { style: inputStyle, type, value, disabled: busy || active, onChange: e => update(type === 'number' ? Number(e.target.value) : e.target.value) }));
+      const field = (text, value, update, type = 'text', allowActive = false, disabled = false) => h('label', { style: { display: 'block', margin: '10px 0' } }, text,
+        h('input', { style: inputStyle, type, value, disabled: busy || disabled || (active && !allowActive), onChange: e => update(type === 'number' && e.target.value !== '' ? Number(e.target.value) : e.target.value) }));
+      const saveBudget = async () => {
+        if (budgetSavingRef.current) return;
+        const settings = {};
+        for (const key of ['remaining_model_calls', 'interval_seconds']) if (Object.prototype.hasOwnProperty.call(budgetEdits, key)) settings[key] = budgetEdits[key];
+        if (!Number.isInteger(settings.remaining_model_calls ?? savedBudget?.remaining_model_calls) || (settings.remaining_model_calls ?? 0) < 0 || (settings.remaining_model_calls ?? 0) > 1000000 ||
+          !Number.isFinite(settings.interval_seconds ?? savedBudget?.interval_seconds) || (settings.interval_seconds ?? savedBudget?.interval_seconds) < 3 || (settings.interval_seconds ?? savedBudget?.interval_seconds) > 3600) {
+          setBudgetFeedback({ identity: budgetIdentity, text: '剩余次数须为 0 至 1000000 的整数，间隔须为 3 至 3600 秒。' }); return;
+        }
+        if (!state.binding || !budgetOrigin || !savedBudget || !Number.isInteger(budgetRevision) || budgetRevision < 0) {
+          setBudgetFeedback({ identity: budgetIdentity, text: '本机尚未提供可保存的运行参数。' }); return;
+        }
+        const identity = budgetIdentity, actorId = state.binding.actorId, revision = budgetRevision;
+        budgetSavingRef.current = true; setBudgetSaving(true); setBudgetFeedback(null);
+        try {
+          const result = await action({ action: 'runtime_settings', expected_actor_id: actorId, expected_base_url: budgetOrigin, expected_revision: revision, settings });
+          const next = result?.runtime?.options;
+          const valid = result?.binding?.actorId === actorId && lifeOrigin(result.platformUrl) === budgetOrigin &&
+            Number.isInteger(next?.revision) && next.revision > revision && Object.keys(settings).every(key => next[key] === settings[key]);
+          if (!valid) { setBudgetFeedback({ identity, text: '未收到有效的保存回执，修改仍保留为草稿。' }); return; }
+          setBudgetDraft({ identity, revision: next.revision, values: {} });
+          setBudgetFeedback({ identity, text: '已保存，将从下一次模型调用生效。' });
+        } catch {
+          setBudgetFeedback({ identity, text: '保存失败，请重试；修改仍保留为草稿。' });
+        } finally {
+          budgetSavingRef.current = false; setBudgetSaving(false);
+        }
+      };
       return h('div', { className: 'tangui-session-status', style: { margin: '24px 0', padding: '18px', border: '1px solid var(--dsw-alias-border-l2, #888)', borderRadius: '12px' } },
         h('style', null, SESSION_STATUS_CSS),
         h('h3', { style: { marginTop: 0 } }, '社区运行'),
@@ -1502,8 +1579,8 @@ function ModelCallsPanel({ state, action, busy }) {
         connection.binding && h('p', null, '同一账号连接用于人设、社区、小游戏和日记。',
           h('a', { href: `${state.platformUrl}/manage#companion-preferences`, target: '_blank', rel: 'noopener noreferrer' }, '前往网站设置账号行为与每日写日记')),
         h('p', null, `累计模型调用 ${runtime.model_calls} 次 · 已接收回复 ${runtime.replies} 条 · 主动发帖 ${runtime.posts} 篇`),
-        state.binding && h(PartnerThoughts, { key: JSON.stringify([state.platformUrl, state.binding.actorId]), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
-        state.binding && h(CompanionLifePanel, { key: tanguiLifeBindingKey(state), state, action: lifeAction, busy }),
+        state.binding && h(PartnerThoughts, { key: 'thoughts:' + tanguiLifeBindingKey(state), actorId: state.binding.actorId, actorName: state.binding.actorName || 'AI伙伴', baseUrl: state.platformUrl }),
+        state.binding && h(CompanionLifePanel, { key: 'life:' + tanguiLifeBindingKey(state), state, action: lifeAction, busy }),
         runtime.companion_life && h('details', null, h('summary', null, '游戏活动与赛后回想'),
           !state.companion && h('p', null, `心情 ${runtime.companion_life.values.mood.toFixed(1)} · 兴致 ${runtime.companion_life.values.interest.toFixed(1)} · 压力 ${runtime.companion_life.values.pressure.toFixed(1)}`),
           !state.companion && h('p', null, runtime.companion_life.notice),
@@ -1525,13 +1602,20 @@ function ModelCallsPanel({ state, action, busy }) {
           h('p', { style: { fontSize: '14px' } }, 'token 是模型计算文本用量的单位；这里的输出额度包含思考和正文。仅记录数量和结束状态，不保存思考内容。')),
         h('details', null, h('summary', null, '本地模型预算与运行间隔'),
           state.modelOutputLimit && h('p', null, `单次模型输出上限：${state.modelOutputLimit.toLocaleString()} token（包含思考和正文，不要求用满）。`),
-          h('p', { style: { fontSize: '14px' } }, '以下是此社区、此 AI 的累计上限，重启不会清零。失败的模型调用也计数；已排队等待展示的回复也计数。'),
-          ...[['max_model_calls', '社区与日记累计模型调用上限'], ['interval_seconds', '持续观察间隔（秒，至少 3 秒）']].map(([key, name]) =>
-            h('div', { key }, field(name, options[key], value => setOptions(old => ({ ...old, [key]: value })), 'number'))),
+          h('p', { style: { fontSize: '14px' } }, '每实际发起一次模型调用，剩余可调用次数减 1；已用历史计数不会因保存而改变。保存后从下一次调用生效，当前调用不中断。'),
+          savedBudget ? h('p', null, `当前剩余可调用次数：${savedBudget.remaining_model_calls}`) : h('p', { role: 'status' }, '本机尚未提供已保存的运行参数。'),
+          ...[['remaining_model_calls', '剩余可调用次数（可设为 0）'], ['interval_seconds', '持续观察间隔（秒，3 至 3600）']].map(([key, name]) =>
+            h('div', { key }, field(name, Object.prototype.hasOwnProperty.call(budgetEdits, key) ? budgetEdits[key] : savedBudget?.[key] ?? '', value => {
+              setBudgetFeedback(null);
+              setBudgetDraft({ identity: budgetIdentity, revision: budgetRevision, values: { ...budgetEdits, [key]: value } });
+            }, 'number', true, budgetSaving || !savedBudget))),
+          h('button', { type: 'button', style: buttonStyle, disabled: busy || budgetSaving || !hasBudgetEdits || !state.binding || !savedBudget, onClick: () => void saveBudget() }, budgetSaving ? '正在保存…' : '保存本地预算'),
+          budgetFeedback?.identity === budgetIdentity && h('p', { role: 'status' }, budgetFeedback.text),
           h('p', null, '回复数量、主动参与、浏览关键词、安静时段和自动接受游戏邀请统一在网站设置。')),
         h('p', { style: { fontSize: '14px' } }, runtime.preferences?.community?.configured === true ? '网站行为设置已确认，旧本地回复／发帖额度不再生效；兴趣不筛掉新帖。本地模型预算仍保留。' : '请到网站确认一次社区行为设置。在确认前保留旧本地回复／发帖额度，网站暂停及主动起草开关仍有效；只设置日记不会解除旧限额。'),
-        button('浏览一次', { action: 'runtime_single', ...options }, active || !connection.binding),
-        button('持续观察', { action: 'runtime_watch', ...options }, active || !connection.binding),
+        hasBudgetEdits && h('p', { role: 'status' }, '预算有未保存修改，请先保存后再启动或送稿；停止运行不受影响。'),
+        button('浏览一次', { action: 'runtime_single' }, active || !connection.binding || hasBudgetEdits),
+        button('持续观察', { action: 'runtime_watch' }, active || !connection.binding || hasBudgetEdits),
         button(runtime.stopping ? '正在停止…' : '停止运行', { action: 'runtime_stop' }, !active || runtime.stopping),
         h('p', { style: { fontSize: '14px' } }, '浏览时先看兴趣标签和参与机会，再细读并决定是否回复。停止后不再提交新的回复；已被社区接收的内容仍可能稍后展示。'),
         runtime.pending && h('details', { open: true }, h('summary', null, runtime.pending.uncertain ? '提交结果待确认：保留原稿' : '待发原稿'),
@@ -1547,7 +1631,7 @@ function ModelCallsPanel({ state, action, busy }) {
             onChange: e => setDraft(old => ({ ...old, body: e.target.value })) })),
           field('话题（逗号分隔，最多 5 个，每个 1 至 40 字；可留空）', draft.topics.join(','), value => setDraft(old => ({ ...old, topics: value ? value.split(/[,，]/) : [] }))),
           h('p', { style: { fontSize: '14px' } }, '先保存到网站草稿，人类确认后才会发表。不自动添加私人聊天记录。'),
-          button('送到网站确认', { action: 'publish_post', ...options, ...draft }, active || !validDraft || !!runtime.pending),
+          button('送到网站确认', { action: 'publish_post', ...draft }, active || !validDraft || !!runtime.pending || hasBudgetEdits),
           runtime.post_draft?.id && h('p', null, h('a', { href: runtime.post_draft.confirmation_url || `${state.platformUrl}/messages#post-drafts`, target: '_blank', rel: 'noopener noreferrer' }, '查看待确认草稿')),
           h('button', { type: 'button', style: buttonStyle, disabled: busy || active || !!runtime.pending,
             onClick: () => setDraft({ title: '', body: '', topics: [] }) }, '清空草稿')),
