@@ -520,12 +520,12 @@ test('uncertain one-shot token redemption is not silently retried after restart'
   const restarted = f.make(); f.advance(); await restarted.tick(); assert.equal(f.remote.issued, 1); assert.equal(restarted.publicStatus().pairing.uncertain, true);
 });
 
-test('native runtime tool asks DSH human approval, respects denials, and guards side effects', async () => {
+test('native runtime tool asks DSH human approval for starting activity, respects denials, and guards side effects', async () => {
   let tool, approval, guarded = 0, starts = 0;
   const runtime = { publicStatus: () => ({ state: 'stopped' }), start: () => { starts++; }, stop: () => {}, exportActivity: async () => ({ data: [] }) };
   registerRuntimeTool({ tools: { register: value => { tool = value; } }, on: (_name, handler) => { approval = handler; } },
     { runtime, connection: { publicStatus: () => ({}), authorize: async () => ({}) }, guard: () => { guarded++; } });
-  for (const action of ['authorize', 'single', 'watch', 'publish_post']) {
+  for (const action of ['authorize', 'single', 'watch']) {
     assert.equal((await approval({ name: tool.name, arguments: { action } }, async () => ({ kind: 'allow' }))).kind, 'ask');
     assert.equal((await approval({ name: tool.name, arguments: { action } }, async () => ({ kind: 'deny' }))).kind, 'deny');
   }
@@ -533,6 +533,56 @@ test('native runtime tool asks DSH human approval, respects denials, and guards 
   const exec = { signal: new AbortController().signal };
   await assert.rejects(() => tool.execute({ action: 'single', confirmed: true }, exec), { code: 'invalid_argument' });
   await tool.execute({ action: 'single' }, exec); assert.equal(starts, 1); assert.equal(guarded, 1);
+});
+
+test('both draft-only tool names work without an extra DSH prompt and never publish', async t => {
+  for (const action of ['draft_post', 'publish_post']) for (const running of [false, true]) {
+    await t.test(`${action}: ${running ? 'queued in observation' : 'stopped'}`, async child => {
+      const f = fixture(child, { posts: true });
+      if (running) {
+        f.runtime.load(f.binding); f.runtime.mode = 'watch';
+        f.runtime.task = Promise.resolve(); f.runtime.abort = new AbortController();
+        f.runtime.preferences = { community: { auto_post: false } };
+      }
+      let tool, approval, guarded = 0, writes = 0;
+      registerRuntimeTool({ tools: { register: value => { tool = value; } }, on: (_name, handler) => { approval = handler; } },
+        { runtime: f.runtime, connection: { publicStatus: () => ({}) }, guard: () => { guarded++; },
+          withOperation: async (work, readOnly) => { assert.equal(readOnly, false); writes++; return work(); } });
+      const args = { action, title: '一起游戏的感想', body: '和大家共同玩游戏，过程很开心。' };
+      const verdict = await approval({ name: tool.name, arguments: args }, async () => ({ kind: 'allow' }));
+      // Never approval mode rejects a newly requested prompt; it executes allow.
+      assert.equal(verdict.kind, 'allow', 'draft creation must not request a session prompt');
+      const result = await tool.execute(args, { signal: new AbortController().signal });
+      assert.equal(guarded, running ? 0 : 1); assert.equal(writes, 1);
+      if (running) {
+        assert.equal(result.result.queued, true);
+        assert.ok(f.make().state.draft_request.key);
+        assert.equal(f.remote.calls.length, 0, 'queued draft uses the existing observation controller');
+      } else {
+        assert.equal(result.result.draft.status, 'pending');
+        assert.match(result.result.notice, /网页审核/);
+        assert.equal(f.remote.submissions.length, 1);
+        assert.equal(f.remote.submissions[0].path, '/api/v1/agent/post-drafts');
+      }
+      assert.equal(f.remote.modelCalls, 0);
+      assert.equal(f.runtime.publicStatus().posts, 0);
+      assert.equal(f.remote.calls.some(call => call.path === '/api/v1/posts' && call.body), false);
+    });
+  }
+});
+
+test('draft exemptions preserve an upstream ask or denial and do not permit malformed arguments', async () => {
+  let tool, approval, requests = 0;
+  registerRuntimeTool({ tools: { register: value => { tool = value; } }, on: (_name, handler) => { approval = handler; } },
+    { runtime: { publicStatus: () => ({}), requestDraft: async () => { requests++; } }, connection: {} });
+  for (const action of ['draft_post', 'publish_post']) {
+    for (const kind of ['ask', 'deny']) {
+      const upstream = { kind, reason: 'host-policy' };
+      assert.equal(await approval({ name: tool.name, arguments: { action } }, async () => upstream), upstream);
+    }
+    await assert.rejects(tool.execute({ action, confirmed: true }, { signal: new AbortController().signal }), { code: 'invalid_argument' });
+  }
+  assert.equal(requests, 0);
 });
 
 test('DSH runtime adapter uses the selected model in one isolated tool-free call', async () => {
