@@ -94,7 +94,7 @@ test('runtime settings show saved remainder and permit hot saving without interr
   budgetInput(ui, '剩余可调用次数').props.onChange({target:{value:'1000'}});await ui.flush();
   state = { ...state, runtime: { ...state.runtime, options: { ...state.runtime.options, remaining_model_calls: 9 } } };
   ui.setProps({state,action});assert.equal(budgetInput(ui,'剩余可调用次数').props.value,1000);
-  button(ui,'保存本地预算').props.onClick();await ui.flush();
+  button(ui,'保存本地设置').props.onClick();await ui.flush();
   assert.equal(actions.length,1);assert.equal(actions[0].action,'runtime_settings');
   assert.equal(actions[0].settings.remaining_model_calls,1000);assert.equal(actions[0].settings.interval_seconds,undefined);
   assert.equal(actions[0].expected_revision,4);assert.equal(state.runtime.running,true);
@@ -111,13 +111,27 @@ test('editing interval never refills calls consumed during polling and failed sa
   budgetInput(ui,'持续观察间隔').props.onChange({target:{value:'7'}});await ui.flush();
   state={...state,runtime:{...state.runtime,options:{...state.runtime.options,remaining_model_calls:8}}};
   ui.setProps({state,action});assert.equal(budgetInput(ui,'剩余可调用次数').props.value,8);
-  button(ui,'保存本地预算').props.onClick();await ui.flush();
+  button(ui,'保存本地设置').props.onClick();await ui.flush();
   assert.deepEqual(Object.keys(actions[0].settings),['interval_seconds']);assert.equal(actions[0].settings.interval_seconds,7);
   assert.match(ui.text(),/未收到有效的保存回执/);assert.doesNotMatch(ui.text(),/已保存，将从下一次/);
   assert.equal(budgetInput(ui,'持续观察间隔').props.value,7);
   state={...state,binding:{actorId:'ai-b'},runtime:{...state.runtime,options:{remaining_model_calls:20,interval_seconds:12,revision:0}}};
   ui.setProps({state,action});assert.equal(budgetInput(ui,'持续观察间隔').props.value,12);
   assert.equal(budgetInput(ui,'剩余可调用次数').props.value,20);
+});
+
+test('automatic reading range defaults to 48 and saving only it leaves the running budget untouched', async t => {
+  const state=budgetState(), actions=[];
+  const action=async payload=>{actions.push(payload);return {...state,runtime:{...state.runtime,options:{...state.runtime.options,...payload.settings,revision:5}}};};
+  const ui=harness('RuntimePanel',{state,action});t.after(()=>ui.dispose());ui.render();await ui.flush();
+  assert.equal(budgetInput(ui,'自动观察范围').props.value,48);
+  assert.equal(budgetInput(ui,'自动观察范围').props.disabled,false);
+  budgetInput(ui,'自动观察范围').props.onChange({target:{value:'168'}});await ui.flush();
+  button(ui,'保存本地设置').props.onClick();await ui.flush();
+  assert.deepEqual(Object.keys(actions[0].settings),['observation_lookback_hours']);
+  assert.equal(actions[0].settings.observation_lookback_hours,168);
+  assert.equal(actions[0].action,'runtime_settings');
+  assert.equal(state.runtime.running,true);
 });
 
 test('life panel keeps private state hidden for absent or mismatched companion identity', t => {

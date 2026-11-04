@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { CompanionMind, MIND_INSTRUCTION } from '../lib/companion-mind.js';
+import { CompanionMind, MIND_INSTRUCTION, parseMind, parseEmbeddedAppraisal } from '../lib/companion-mind.js';
 import { serviceMind, mindResting } from '../lib/mind-runtime.js';
 
 function fixture() {
@@ -21,6 +21,63 @@ function appraise(f, id, extra = {}) {
 }
 const initial = { traits: { sociability: 20, optimism: 35 }, baselines: { mood: 50, energy: 55, pressure: 35 },
   activities: { public: 20, private: 85, reflect: 90 }, description: '安静但喜欢与熟悉的人详细交流，愿意思考风险。' };
+
+test('management research seeds persist only abstract questions and follow identity, correction and exclusion', () => {
+  const f = fixture();
+  const event = f.mind.noteDialog({ session_id: 'management', event_id: 'message-1', role: 'user', text: 'PRIVATE_TRANSCRIPT_SENTINEL 今天这局麻将有点可惜。' });
+  const inspiration = { question: '连续失利会如何影响风险偏好？', keywords: ['游戏', '风险判断'] };
+  const value = { event_ids: [event.id], summary: 'PRIVATE_SUMMARY_SENTINEL', reflection: 'PRIVATE_REFLECTION_SENTINEL', inspiration };
+  const options = { session_id: 'management', management_session_id: 'management' };
+  f.mind.recordAppraisal(value, options);
+  assert.equal(f.mind.recordAppraisal(value, options).duplicate, true);
+  const reopened = new CompanionMind(f.options), seeds = reopened.researchSeeds('management');
+  assert.deepEqual(seeds, [{ id: event.id, ...inspiration, at: new Date(f.now()).toISOString() }]);
+  assert.doesNotMatch(JSON.stringify(seeds), /PRIVATE_|reflection|summary|source|memory_dir/);
+  assert.equal(reopened.researchSeeds('another-session').length, 0);
+  assert.equal(reopened.researchSeeds(undefined).length, 0);
+  reopened.session({ ...f.guard(), session_id: 'management', included: false });
+  assert.equal(reopened.researchSeeds('management').length, 0);
+  reopened.session({ ...f.guard(), session_id: 'management', included: true });
+  reopened.correct({ ...f.guard(), event_id: event.id, explanation: '这段是在讨论虚构情节，不是实际活动。' });
+  assert.equal(reopened.researchSeeds('management').length, 0);
+  f.change({ base_url: 'http://localhost:4999', actor_id: 'a2', memory_dir: 'X:/test/companion-two' });
+  assert.equal(reopened.researchSeeds('management').length, 0);
+});
+
+test('community models cannot create local inspirations and seeds require an actual human dialogue event', () => {
+  const f = fixture(), inspiration = { question: '协作游戏怎样影响风险选择？', keywords: ['协作游戏'] };
+  const human = f.mind.noteDialog({ session_id: 'management', event_id: 'h1', role: 'user', text: '今天一起玩了一个合作游戏。' });
+  const value = { event_ids: [human.id], summary: '', reflection: '', inspiration };
+  assert.throws(() => parseMind(JSON.stringify(value)), { code: 'life_invalid_appraisal' });
+  assert.throws(() => parseEmbeddedAppraisal({ summary: '', reflection: '', inspiration }), { code: 'life_invalid_appraisal' });
+  assert.throws(() => f.mind.recordAppraisal(value), { code: 'life_invalid_appraisal' });
+  assert.throws(() => f.mind.recordAppraisal(value, { session_id: 'management', management_session_id: 'different' }), { code: 'life_invalid_appraisal' });
+  const assistant = f.mind.noteDialog({ session_id: 'management', event_id: 'a1', role: 'assistant', text: '计划下次继续尝试。' });
+  assert.throws(() => f.mind.recordAppraisal({ ...value, event_ids: [assistant.id] }, { session_id: 'management', management_session_id: 'management' }), { code: 'life_event_mismatch' });
+  f.mind.noteEvent({ id: 'public-event', source: 'community', summary: '公开帖子内容', session_id: 'management' });
+  assert.throws(() => f.mind.recordAppraisal({ ...value, event_ids: [human.id, 'public-event'] }, { session_id: 'management', management_session_id: 'management' }), { code: 'life_event_mismatch' });
+  assert.equal(f.mind.pending('management').length, 3, 'rejected seeds must not consume the original experiences');
+});
+
+test('inspiration filters reject obvious private material and copied dialogue; selection is bounded and does not resurrect disabled history', () => {
+  const f = fixture(), opts = { session_id: 'management', management_session_id: 'management' };
+  const event = f.mind.noteDialog({ session_id: 'management', event_id: 'private', role: 'user', text: '昨天讨论的私人项目名称属于特别敏感的公司工作资料，需要留在本地。' });
+  const value = { event_ids: [event.id], summary: '', reflection: '' };
+  for (const question of ['联系 somebody@example.com 询问活动？', 'api_key=sk_12345678901234567890', '如何使用 C:\\private\\work 文件？', '我们的提督今天为何特别疲惫？', '昨天讨论的私人项目名称属于特别敏感的公司工作资料，有什么影响？']) {
+    assert.throws(() => f.mind.recordAppraisal({ ...value, inspiration: { question, keywords: [] } }, opts), { code: 'life_inspiration_invalid' });
+  }
+  for (let i = 0; i < 15; i++) {
+    const e = f.mind.noteDialog({ session_id: 'management', event_id: 'new-' + i, role: 'user', text: '又讨论了一个实际活动。' });
+    f.mind.recordAppraisal({ event_ids: [e.id], summary: '', reflection: '', inspiration: { question: `协作机制的第 ${i} 个问题如何研究？`, keywords: ['协作'] } }, opts);
+    f.tick(1000);
+  }
+  assert.equal(f.mind.researchSeeds('management').length, 12);
+  assert.match(f.mind.researchSeeds('management')[0].question, /14/);
+  f.mind.configure({ ...f.guard(), settings: { enabled: false } });
+  assert.equal(f.mind.researchSeeds('management').length, 0);
+  f.tick(1000); f.mind.configure({ ...f.guard(), settings: { enabled: true } });
+  assert.equal(f.mind.researchSeeds('management').length, 0);
+});
 
 test('same persona sessions share state; excluded sessions, unknown evidence and old history cannot affect it', () => {
   const f = fixture(); f.mind.registerSession({ id: 'one' }); f.mind.registerSession({ id: 'two' });

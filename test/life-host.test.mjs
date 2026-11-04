@@ -215,6 +215,35 @@ test('appraisals use core validation, cannot change settings or submit another s
   assert.equal(LIFE_APPRAISAL_PARAMETERS.properties.event_ids.maxItems, 12);
 });
 
+test('only designated management conversation can supply a research inspiration while other conversations retain feelings', async t => {
+  const f = taskMind(t), h = host({ mind: f.mind });
+  await h.ready(h.a, 'a'); await h.ready(h.b, 'b');
+  const inspiration = { question: '合作游戏中的分工会怎样影响信任？', keywords: ['合作游戏', '信任'] };
+  const managed = f.mind.pending(h.a.id)[0], other = f.mind.pending(h.b.id)[0];
+  const ctxA = (await h.assemble(h.a)).contexts.find(c => c.name === 'tangui-companion-state').text;
+  const ctxB = (await h.assemble(h.b)).contexts.find(c => c.name === 'tangui-companion-state').text;
+  assert.match(ctxA, /本会话是指定管理者互动会话/);
+  assert.match(ctxB, /不得附带研究 inspiration/);
+  await assert.rejects(h.runTool({ ...appraisal([other.id]), inspiration }, h.b), { code: 'life_inspiration_session' });
+  await h.runTool(appraisal([other.id]), h.b);
+  await h.runTool({ ...appraisal([managed.id]), inspiration });
+  assert.equal(h.adapter.researchSessionId(), h.a.id);
+  assert.equal(f.mind.researchSeeds(h.a.id).length, 1);
+  assert.equal(f.mind.researchSeeds(h.b.id).length, 0);
+  assert.equal(f.mind.status().usage.calls, 0, 'saving the seed does not start an additional model call');
+  assert.equal(LIFE_APPRAISAL_PARAMETERS.properties.inspiration.properties.keywords.maxItems, 5);
+  h.state.management = h.b.id;
+  assert.equal(h.adapter.researchSessionId(), h.b.id);
+  h.user(h.a, 'a-next'); await h.assemble(h.a);
+  const next = f.mind.pending(h.a.id)[0];
+  await assert.rejects(h.runTool({ ...appraisal([next.id]), inspiration }), { code: 'life_inspiration_session' });
+  f.mind.session({ ...f.guard, session_id: h.b.id, included: false });
+  assert.equal(h.adapter.researchSessionId(), null);
+  f.mind.session({ ...f.guard, session_id: h.b.id, included: true });
+  h.state.selectedDirectory = MEMORY + '-different';
+  assert.equal(h.adapter.researchSessionId(), null);
+});
+
 test('pending same-session experience from before restart remains usable under real core ownership checks', async t => {
   const parent = resolve('.test-work'); mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(join(parent, 'life-host-'));

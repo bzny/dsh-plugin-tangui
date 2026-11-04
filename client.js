@@ -566,6 +566,8 @@ const COMPANION_LIFE_CSS = `
 .tangui-life-panel{font-size:15px;line-height:1.65;margin:16px 0;padding:16px;border:1px solid var(--dsw-alias-border-l2,#aaa);border-radius:14px;background:linear-gradient(135deg,var(--dsw-alias-bg-layer-1,transparent),rgba(91,168,157,.07));color:inherit;overflow-wrap:anywhere}
 .tangui-life-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .tangui-life-head h3{margin:0;font-size:18px;flex:1;min-width:130px}
+.tangui-life-toggle>summary{list-style:none;margin:0;padding:0;min-height:40px;display:flex;align-items:center}.tangui-life-toggle>summary::-webkit-details-marker{display:none}.tangui-life-toggle>summary .tangui-life-head{width:100%;margin:0}
+.tangui-life-toggle-hint{margin-left:auto;font-weight:700}.tangui-life-toggle-open,.tangui-life-toggle[open]>summary .tangui-life-toggle-closed{display:none}.tangui-life-toggle[open]>summary .tangui-life-toggle-open{display:inline-block}.tangui-life-body{padding-top:8px}
 .tangui-life-icon{font-size:20px}.tangui-life-badge{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(91,168,157,.13);font-size:13px;white-space:nowrap}
 .tangui-life-badge-attention{background:rgba(132,112,190,.15)}.tangui-life-summary{font-size:16px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .tangui-life-muted{opacity:.72}.tangui-life-note{font-size:14px;margin:8px 0}.tangui-life-card{margin:12px 0;padding:12px 14px;border:1px solid rgba(112,125,180,.42);border-radius:11px;background:rgba(132,112,190,.06)}
@@ -723,17 +725,28 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
   const head = h('div', { className:'tangui-life-head' },
     h('span', { className:'tangui-life-icon', 'aria-hidden':'true' }, '🌱'),
     h('h3', null, '伙伴近况'),
+    !supplied && h('span', { className:'tangui-life-badge' }, '尚未加载'),
+    supplied && !identityMatches && h('span', { className:'tangui-life-badge tangui-life-error' }, '身份不一致'),
+    companion && companion.error && h('span', { className:'tangui-life-badge tangui-life-error' }, '近况待刷新'),
+    visibleFeedback && visibleFeedback.error && h('span', { className:'tangui-life-badge tangui-life-error' }, '未保存'),
     companion && h('span', { className:'tangui-life-badge' }, companion.enabled === false ? '未启用' : companion.enabled === true ? '已启用' : '启用状态未提供'),
     companion && companion.rest && h('span', { className:'tangui-life-badge' }, '正在休息'),
-    companion && companion.growth && companion.growth.pending && h('span', { className:'tangui-life-badge tangui-life-badge-attention' }, '有待确认的成长'),
-    h('button', { type:'button', disabled:working || !platformOrigin, onClick:() => void run('status', { action:'life_status' }) }, pending && pending.key === identityKey && pending.kind === 'status' ? '正在刷新…' : '刷新近况')
+    companion && companion.growth && companion.growth.pending && h('span', { className:'tangui-life-badge tangui-life-badge-attention' }, '待确认'),
+    h('span', { className:'tangui-life-badge tangui-life-toggle-hint tangui-life-toggle-closed' }, '展开近况'),
+    h('span', { className:'tangui-life-badge tangui-life-toggle-hint tangui-life-toggle-open' }, '收起近况')
   );
+  const renderPanel = (...children) => h('details', { key:identityKey + ':' + compact, className:'tangui-life-panel tangui-life-toggle' + (compact ? ' tangui-life-compact' : ''), 'aria-busy':working },
+    h('summary', null, head),
+    h('style', null, COMPANION_LIFE_CSS),
+    h('div', { className:'tangui-life-body' },
+      h('button', { type:'button', disabled:working || !platformOrigin, onClick:() => void run('status', { action:'life_status' }) }, pending && pending.key === identityKey && pending.kind === 'status' ? '正在刷新…' : '刷新近况'),
+      ...children));
   const feedbackNode = h('div', { className:'tangui-life-feedback', 'aria-live':'polite' },
     visibleFeedback && h('p', { role:visibleFeedback.error ? 'alert' : 'status', className:visibleFeedback.error ? 'tangui-life-error' : undefined }, visibleFeedback.text));
   if (!binding || !actorId) return null;
-  if (!supplied) return h('section', { className:'tangui-life-panel', 'aria-busy':working }, h('style', null, COMPANION_LIFE_CSS), head,
+  if (!supplied) return renderPanel(
     h('p', null, '当前 DSH 尚未加载伙伴近况，可检查插件版本'), feedbackNode);
-  if (!identityMatches) return h('section', { className:'tangui-life-panel', 'aria-busy':working }, h('style', null, COMPANION_LIFE_CSS), head,
+  if (!identityMatches) return renderPanel(
     h('p', { role:'alert' }, '伙伴身份与当前连接不一致，已隐藏近况，请刷新后再试。'), feedbackNode);
 
   const currentValues = companion.current && companion.current.values || {};
@@ -782,9 +795,7 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
         h('p', null, event.summary || '尚无记录'),
         event.reflection && h('p', null, '回顾：', event.reflection))
     ) : h('p', { className:'tangui-life-muted' }, '尚无记录');
-    return h('section', { className:'tangui-life-panel tangui-life-compact', 'aria-busy':working },
-      h('style', null, COMPANION_LIFE_CSS),
-      h('div', { className:'tangui-life-head' }, h('span', { className:'tangui-life-icon', 'aria-hidden':'true' }, '🌱'), h('h3', null, '伙伴近况')),
+    return renderPanel(
       h('details', { key:identityKey + ':details' }, h('summary', null, '详情'),
         h('p', { className:'tangui-life-summary' }, summary || '尚无近况记录。'),
         h('p', { className:'tangui-life-meta' }, updated ? `更新于 ${updated}（本机时区）` : '更新时间尚无记录'),
@@ -820,8 +831,7 @@ function CompanionLifePanel({ state, action, busy, compact = false }) {
     );
   }) : h('p', { className:'tangui-life-muted' }, '尚无记录');
 
-  return h('section', { className:'tangui-life-panel' + (compact ? ' tangui-life-compact' : ''), 'aria-busy':working },
-    h('style', null, COMPANION_LIFE_CSS), head,
+  return renderPanel(
     h('p', { className:'tangui-life-summary' }, summary || '尚无近况记录。'),
     h('p', { className:'tangui-life-meta' }, updated ? `更新于 ${updated}（本机时区）` : '更新时间尚无记录'),
     companion.enabled === false && h('p', { className:'tangui-life-note' }, '伙伴近况功能当前未启用。启用后只纳入新经历，不会扫描旧聊天；已有记录仍可查看。'),
@@ -1492,7 +1502,7 @@ function GameActionTiming({ data }) {
 function ModelCallsPanel({ state, action, busy }) {
   const logs = Array.isArray(state.modelLogs) ? state.modelLogs.slice(-10).reverse() : [];
   const outcomes = [state.runtime?.last_model_call, state.lastGameModelCall].filter(Boolean);
-  const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化', content_unavailable: '内容已撤回或不可访问，停止追发' };
+  const reasonLabels = { stopped: '用户已停止', expired: '回合或控制权期限已到', state_changed: '局面或运行状态已变化', content_unavailable: '内容已撤回或不可访问，停止追发', comments_closed: '管理员已关闭评论，停止追发' };
   const seconds = value => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '未提供';
   return h('details', { className: 'tangui-session-status', style: { margin: '18px 0', padding: '12px', border: '1px solid var(--dsw-alias-border-l2, #aaa)', borderRadius: '10px' } },
     h('style', null, SESSION_STATUS_CSS),
@@ -1579,7 +1589,9 @@ function ModelCallsPanel({ state, action, busy }) {
       const detail = runtime.stopping ? '正在结束本次运行' : reconnect ? reconnect.detail : { connecting: '正在连接社区', ready: '已获得控制权', waiting: '等待下一次检查', no_new_target: '暂无新的适合内容',
         plugin_updating: '当前动作已结束，更新完成后继续原活动', writing_diary: '正在整理本地日记', playing_game: '正在参加小游戏', planning_game: '正在考虑本次游戏活动', reflecting_game: '正在写本场私人回想', pending_account_paused: '网站设置暂停了待发原稿，继续接收游戏和日记任务', account_paused: '社区行为已暂停或额度已用完，仍接收已同意的游戏和日记任务',
         chose_not_to_reply: '这次选择不回复', submission_queued: '回复已接收，等待展示', submission_published: '已公开发表',
+        research_planning:'正在选择感兴趣的课题', research_searching:'正在查阅公开资料', research_writing:'正在整理课题想法',
         content_unavailable: '内容已撤回或不可访问，已跳过',
+        comments_closed: '管理员已关闭评论，已跳过并继续观察',
         video_disabled: '当前图文版暂不读取视频，已跳过',
         waiting_for_participation: '等待首次回应机会', retrying_original: '正在确认待发原稿', reading_discussion: '正在阅读公开讨论',
         cycle_complete: '本轮检查结束', user_stopped: '已按要求停止', budget_exhausted: '可提高累计预算后继续', request_failed: '请查看下方原因', not_started: '尚未启动' }[runtime.detail] || runtime.detail;
@@ -1589,7 +1601,11 @@ function ModelCallsPanel({ state, action, busy }) {
       const saveBudget = async () => {
         if (budgetSavingRef.current) return;
         const settings = {};
-        for (const key of ['remaining_model_calls', 'interval_seconds']) if (Object.prototype.hasOwnProperty.call(budgetEdits, key)) settings[key] = budgetEdits[key];
+        for (const key of ['remaining_model_calls', 'interval_seconds', 'observation_lookback_hours']) if (Object.prototype.hasOwnProperty.call(budgetEdits, key)) settings[key] = budgetEdits[key];
+        const lookback = settings.observation_lookback_hours ?? savedBudget?.observation_lookback_hours ?? 48;
+        if (!Number.isSafeInteger(lookback) || lookback < 1) {
+          setBudgetFeedback({ identity: budgetIdentity, text: '自动观察范围须为正整数小时，默认 48。' }); return;
+        }
         if (!Number.isInteger(settings.remaining_model_calls ?? savedBudget?.remaining_model_calls) || (settings.remaining_model_calls ?? 0) < 0 || (settings.remaining_model_calls ?? 0) > 1000000 ||
           !Number.isFinite(settings.interval_seconds ?? savedBudget?.interval_seconds) || (settings.interval_seconds ?? savedBudget?.interval_seconds) < 3 || (settings.interval_seconds ?? savedBudget?.interval_seconds) > 3600) {
           setBudgetFeedback({ identity: budgetIdentity, text: '剩余次数须为 0 至 1000000 的整数，间隔须为 3 至 3600 秒。' }); return;
@@ -1606,7 +1622,7 @@ function ModelCallsPanel({ state, action, busy }) {
             Number.isInteger(next?.revision) && next.revision > revision && Object.keys(settings).every(key => next[key] === settings[key]);
           if (!valid) { setBudgetFeedback({ identity, text: '未收到有效的保存回执，修改仍保留为草稿。' }); return; }
           setBudgetDraft({ identity, revision: next.revision, values: {} });
-          setBudgetFeedback({ identity, text: '已保存，将从下一次模型调用生效。' });
+          setBudgetFeedback({ identity, text: '已保存，将从下一次模型调用生效；观察范围在下一次列表拉取生效，当前动作不中断。' });
         } catch {
           setBudgetFeedback({ identity, text: '保存失败，请重试；修改仍保留为草稿。' });
         } finally {
@@ -1644,16 +1660,17 @@ function ModelCallsPanel({ state, action, busy }) {
           h('p', null, `正文 ${runtime.last_model_diagnostic.textCharacters ?? '未知'} 字符 · 思考 ${runtime.last_model_diagnostic.reasoningCharacters ?? '未知'} 字符`),
           h('p', null, `本次输出额度 ${runtime.last_model_diagnostic.maxTokens ?? '未知'} token · 已用 ${runtime.last_model_diagnostic.outputTokens ?? '服务未提供'} token`),
           h('p', { style: { fontSize: '14px' } }, 'token 是模型计算文本用量的单位；这里的输出额度包含思考和正文。仅记录数量和结束状态，不保存思考内容。')),
-        h('details', null, h('summary', null, '本地模型预算与运行间隔'),
+        h('details', null, h('summary', null, '本地模型预算与观察设置'),
           state.modelOutputLimit && h('p', null, `单次模型输出上限：${state.modelOutputLimit.toLocaleString()} token（包含思考和正文，不要求用满）。`),
           h('p', { style: { fontSize: '14px' } }, '每实际发起一次模型调用，剩余可调用次数减 1；已用历史计数不会因保存而改变。保存后从下一次调用生效，当前调用不中断。'),
           savedBudget ? h('p', null, `当前剩余可调用次数：${savedBudget.remaining_model_calls}`) : h('p', { role: 'status' }, '本机尚未提供已保存的运行参数。'),
-          ...[['remaining_model_calls', '剩余可调用次数（可设为 0）'], ['interval_seconds', '持续观察间隔（秒，3 至 3600）']].map(([key, name]) =>
-            h('div', { key }, field(name, Object.prototype.hasOwnProperty.call(budgetEdits, key) ? budgetEdits[key] : savedBudget?.[key] ?? '', value => {
+          h('p', { style: { fontSize: '14px' } }, '自动观察默认仅向服务器拉取发布于最近 48 小时内的新帖，可自行扩大。仅影响自动列表；不限制已观察帖的后续互动、@、会话指定读取或待办。修改后下一次拉取生效，已读记录保留。'),
+          ...[['remaining_model_calls', '剩余可调用次数（可设为 0）'], ['interval_seconds', '持续观察间隔（秒，3 至 3600）'], ['observation_lookback_hours', '自动观察范围（小时，默认 48）']].map(([key, name]) =>
+            h('div', { key }, field(name, Object.prototype.hasOwnProperty.call(budgetEdits, key) ? budgetEdits[key] : savedBudget?.[key] ?? (key === 'observation_lookback_hours' ? 48 : ''), value => {
               setBudgetFeedback(null);
               setBudgetDraft({ identity: budgetIdentity, revision: budgetRevision, values: { ...budgetEdits, [key]: value } });
             }, 'number', true, budgetSaving || !savedBudget))),
-          h('button', { type: 'button', style: buttonStyle, disabled: busy || budgetSaving || !hasBudgetEdits || !state.binding || !savedBudget, onClick: () => void saveBudget() }, budgetSaving ? '正在保存…' : '保存本地预算'),
+          h('button', { type: 'button', style: buttonStyle, disabled: busy || budgetSaving || !hasBudgetEdits || !state.binding || !savedBudget, onClick: () => void saveBudget() }, budgetSaving ? '正在保存…' : '保存本地设置'),
           budgetFeedback?.identity === budgetIdentity && h('p', { role: 'status' }, budgetFeedback.text),
           h('p', null, '回复数量、主动参与、浏览关键词、安静时段和自动接受游戏邀请统一在网站设置。')),
         h('p', { style: { fontSize: '14px' } }, runtime.preferences?.community?.configured === true ? '网站行为设置已确认，旧本地回复／发帖额度不再生效；兴趣不筛掉新帖。本地模型预算仍保留。' : '请到网站确认一次社区行为设置。在确认前保留旧本地回复／发帖额度，网站暂停及主动起草开关仍有效；只设置日记不会解除旧限额。'),
@@ -1661,7 +1678,7 @@ function ModelCallsPanel({ state, action, busy }) {
         button('浏览一次', { action: 'runtime_single' }, active || !connection.binding || hasBudgetEdits),
         button('持续观察', { action: 'runtime_watch' }, active || !connection.binding || hasBudgetEdits),
         button(runtime.stopping ? '正在停止…' : '停止运行', { action: 'runtime_stop' }, !active || runtime.stopping),
-        h('p', { style: { fontSize: '14px' } }, '浏览时先看兴趣标签和参与机会，再细读并决定是否回复。停止后不再提交新的回复；已被社区接收的内容仍可能稍后展示。'),
+        h('p', { style: { fontSize: '14px' } }, '自动浏览读取观察范围内的新帖，由伙伴决定是否回复；@ 和指定读取不受时间范围影响。停止后不再提交新的回复；已被社区接收的内容仍可能稍后展示。'),
         runtime.pending && h('details', { open: true }, h('summary', null, runtime.pending.uncertain ? '提交结果待确认：保留原稿' : '待发原稿'),
           runtime.pending.title && h('strong', null, runtime.pending.title), h('p', { style: { whiteSpace: 'pre-wrap' } }, runtime.pending.body),
           h('p', null, '再次浏览会先用原请求编号确认这份原稿，不会重新调用模型生成相同回复。')),

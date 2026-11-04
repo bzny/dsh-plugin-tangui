@@ -76,6 +76,7 @@ async function fixture(t, { complete = true, soul = SOUL, normalizer } = {}) {
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const options = { stateFile: join(root, 'state', 'state.json'), memoryDir, baseUrl, now: () => time, timeoutMs: 1500,
     normalizePersona: async (input) => { normalizationCalls.push(input); return (normalizer || deterministicNormalizer)(input); } };
+
   t.after(async () => {
     try { for (const dispose of beforeCleanup) await dispose(); }
     finally {

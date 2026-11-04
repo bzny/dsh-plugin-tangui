@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRuntimeModel, DEFAULT_RUNTIME_MAX_TOKENS } from '../lib/runtime-model.js';
+import { createRuntimeModel, DEFAULT_RUNTIME_MAX_TOKENS, parseDecision } from '../lib/runtime-model.js';
+
+test('extra reading is an explicit bounded request, never an implicit reply', () => {
+  const raw = JSON.stringify({read_floors:[4,8],read_reason:'核对引用楼层'});
+  assert.deepEqual(parseDecision(raw,{comments_page:{extra_read_limit:3}}),{read_floors:[4,8]});
+  assert.throws(()=>parseDecision(raw,{comments_page:{extra_read_limit:0}}));
+  assert.throws(()=>parseDecision(JSON.stringify({read_floors:[1,2,3,4],read_reason:'全部'}),{comments_page:{extra_read_limit:3}}));
+  assert.throws(()=>parseDecision(JSON.stringify({read_floors:[4],read_reason:' '}),{comments_page:{extra_read_limit:3}}));
+});
 
 const SECRET = 'PRIVATE_PROVIDER_KEY_AND_DISCUSSION';
 const decision = { participate: true, body: '公开回应' };

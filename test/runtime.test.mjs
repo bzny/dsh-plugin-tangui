@@ -74,7 +74,7 @@ function fixture(t, options = {}) {
       if (remote.withdrawOnClaim) remote.submitUnavailable = true;
       if (remote.slotFull) return error('participation_full'); remote.reserved = true; return send({ reserved: true, post_id: post.id });
     }
-    if (path === '/api/v1/posts/post-test') return remote.postUnavailable ? error('not_found', 404) : send(post);
+    if (path === '/api/v1/posts/post-test') return remote.postUnavailable ? error('not_found', 404) : send(remote.commentsClosed ? { ...post, extensions: { ...post.extensions, moderation: { comments_closed: true, can_comment: false } } } : post);
     if (path === '/api/v1/posts/post-test/comments' && request.method === 'GET') return send(remote.comments, { next_cursor: '2' });
     if (path === '/api/v1/comments/comment-target') return send({ id: 'comment-target', post_id: post.id, status: 'published', author: { id: 'human-test' }, body: '你怎么看？' });
     if ((path.endsWith('/comments') || path === '/api/v1/posts') && request.method === 'POST') {
@@ -85,6 +85,7 @@ function fixture(t, options = {}) {
       if (path === '/api/v1/posts' && remote.postRejection) return error(remote.postRejection.code, remote.postRejection.status);
       if (options.slotRetry && remote.discovery && !remote.reserved) return error('participation_required');
       if (remote.submitUnavailable) { remote.postUnavailable = true; return error('not_found', 404); }
+      if (remote.closeOnSubmit) { remote.commentsClosed = true; return error('comments_closed', 409); }
       const result = { id: `accepted-${remote.submissions.length}`, status: options.queued ? 'queued' : 'published' };
       remote.imports.set(key, { body, result }); remote.submissions.push({ key, body, path });
       if (remote.loseReply) { remote.loseReply = false; throw new Error('fake lost response'); }
@@ -213,6 +214,29 @@ test('withdrawn post is retired before model reading without retries', async t =
   assert.equal(f.remote.calls.filter(c => c.path === '/api/v1/posts/post-test').length, 1);
 });
 
+test('closed comments skip model calls and keep the original incremental progress', async t => {
+  const f = fixture(t); f.remote.commentsClosed = true;
+  f.runtime.start({ mode: 'single' }); await f.runtime.settled();
+  assert.equal(f.remote.modelCalls, 0);
+  assert.equal(f.remote.submissions.length, 0);
+  assert.ok(f.runtime.state.completed.includes('browse:post-test'));
+  assert.notEqual(f.runtime.publicStatus().state, 'error');
+  const restarted = f.make(); restarted.start({ mode: 'single' }); await restarted.settled();
+  assert.equal(f.remote.modelCalls, 0);
+});
+
+test('closing comments during generation retires only the saved delivery without another model call', async t => {
+  const f = fixture(t); f.remote.closeOnSubmit = true;
+  f.runtime.start({ mode: 'single' }); await f.runtime.settled();
+  assert.equal(f.remote.modelCalls, 1);
+  assert.equal(f.remote.submissions.length, 0);
+  assert.equal(f.runtime.publicStatus().pending, null);
+  assert.equal(f.runtime.publicStatus().replies, 0);
+  assert.notEqual(f.runtime.publicStatus().state, 'error');
+  const restarted = f.make(); restarted.start({ mode: 'single' }); await restarted.settled();
+  assert.equal(f.remote.modelCalls, 1);
+});
+
 test('withdrawal during generation or participation retires pending reply without another model call', async t => {
   for (const stage of ['submit', 'claim', 'after_claim']) await t.test(stage, async child => {
     const f = fixture(child, { discovery: true, slotRetry: stage !== 'submit' });
@@ -267,7 +291,7 @@ test('stop during a model call never submits the late result', async t => {
 test('an update waits for one reply, wakes a long observation interval and restores exact limits without reposting', async t => {
   let finish;
   const f = fixture(t, { decide: () => new Promise(resolve => { finish = resolve; }) });
-  const options = { mode: 'watch', interval_seconds: 3600, max_model_calls: 17, max_replies: 13, max_posts: 4, interest_threshold: 0.6, query: '公开游戏' };
+  const options = { mode: 'watch', interval_seconds: 3600, observation_lookback_hours: 168, max_model_calls: 17, max_replies: 13, max_posts: 4, interest_threshold: 0.6, query: '公开游戏' };
   f.runtime.start(options); await until(() => !!finish);
   f.runtime.requestUpdatePause();
   assert.equal(f.runtime.busyForUpdate(), true);
