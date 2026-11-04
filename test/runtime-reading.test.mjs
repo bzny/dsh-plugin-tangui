@@ -19,7 +19,8 @@ function fixture(t, count = 4) {
     const u = new URL(url), path = u.pathname, body = request.body ? JSON.parse(request.body) : null;
     remote.calls.push({path,query:u.searchParams,body,key:request.headers['Idempotency-Key']});
     if (path === '/api/v1/me') return send({actor,scopes:binding.scopes});
-    if (path === '/api/v1/capabilities') return send({features:{reading_after:true,discovery:true}});
+    if (path === '/api/v1/capabilities') return send({features:{reading_after:true,discovery:true,bounded_reading:!!remote.bounded}});
+    if (path === '/api/v1/reading/states') return send(body.post_ids.map(id=>({id,reading_revision:remote.revision || '0:0:0'})));
     if (path === '/api/v1/agent/preferences') return send({community:{configured:true,paused:!!remote.paused,proactive_comments:true,reply_to_interactions:true,keywords:'不会命中的旧关键词',reply_remaining:null},diary:{timezone:'Asia/Shanghai'}});
     if (path === '/api/v1/agent/configuration') return send({actor,persona});
     if (path === '/api/v1/images/policy') return send({default_pack_id:'pack_default'});
@@ -27,16 +28,23 @@ function fixture(t, count = 4) {
     if (path === '/api/v1/agent/control/acquire') return send({actor_id:actor.id,active:true,owned_by_current_grant:true,epoch:1,server_time:new Date().toISOString(),expires_at:new Date(Date.now()+60000).toISOString()});
     if (path === '/api/v1/agent/control/release') return send({active:false});
     if (path === '/api/v1/events') return send(remote.events,{next_cursor:remote.events.at(-1)?.id || '0'});
-    if (path === '/api/v1/posts') {
-      const after = Number(u.searchParams.get('after')), rows = remote.posts.filter(p => p.seq > after), page = rows.slice(0,2);
+    if (path === '/api/v1/posts' || path === '/api/v1/reading/feed') {
+      const after = Number(u.searchParams.get('after'));
+      const hours = u.searchParams.has('lookback_hours') ? Number(u.searchParams.get('lookback_hours')) : Infinity;
+      const rows = remote.posts.filter(p => p.seq > after && (p.ageHours ?? 0) <= hours), page = rows.slice(0,2);
       return send(page,{next_cursor:remote.badCursor ? String(after) : String(page.at(-1)?.seq ?? after),has_more:rows.length > 2});
     }
     const media=/^\/api\/v1\/media\/assets\/(asset-post-\d+)\/context$/.exec(path);
     if(media) return send({asset_id:media[1],state:'ready',frame_interval_seconds:3,summary:'公开的视频理解材料',
       frames:[{index:0,time:0,description:'测试画面'}],segments:[],next_cursor:null});
-    const match = /^\/api\/v1\/posts\/(post-\d+)(?:\/(comments|participation))?$/.exec(path);
+    const match = /^\/api\/v1\/posts\/(post-\d+)(?:\/(comments|participation|reading-context))?$/.exec(path);
     if (!match) throw new Error(`Unexpected fixture path ${path}`);
     const [,id,kind] = match, post = remote.posts.find(p => p.id === id);
+    if (kind === 'reading-context') {
+      const floors=u.searchParams.has('floors')?u.searchParams.get('floors').split(',').map(Number):[1,2,3,9,10,11,12,13,14,15];
+      return send({post,reading_revision:remote.revision || '0:0:0',comments:floors.map(n=>({id:`comment-${n}`,body:`第${n}层`,published_order:n,status:'published',author:{id:'human',kind:'human'}})),
+        comments_page:{selection:'first3_latest7',limit:10,total_visible:15,has_more:true,floors,extra_read_limit:3}});
+    }
     if (!kind) {
       if(!post) return error('not_found',404);
       if(remote.mediaPending.has(id))remote.videoPosts.add(id);
@@ -51,7 +59,8 @@ function fixture(t, count = 4) {
   };
   const instances = [], make = () => {
     const runtime = new CommunityRuntime({directory,connection:{binding:()=>binding},fetchImpl,decide:async context => {
-      remote.contexts.push(context); const participate = typeof remote.participate === 'function' ? remote.participate(context) : remote.participate;
+      remote.contexts.push(structuredClone(context)); const participate = typeof remote.participate === 'function' ? remote.participate(context) : remote.participate;
+      if (remote.extra && remote.contexts.length === 1) return {read_floors:[5]};
       if(remote.afterModel) await remote.afterModel(runtime);
       return {participate,body:participate ? '具体补充' : '',...(remote.attachments ? {attachments:remote.attachments} : {}),reflection:remote.reflection || '',decision_note:participate ? '回答具体问题' : '已有同一观点，不重复回应'};
     }}); instances.push(runtime); return runtime;
@@ -61,6 +70,69 @@ function fixture(t, count = 4) {
   return {remote,make,run};
 }
 const mention = (id,kind='human') => ({id:String(id),type:'post.mentioned',author_id:kind==='human'?'human':'other-ai',author_kind:kind,reply_to_actor_id:'reader',post_id:'post-1',resource_id:'post-1'});
+
+test('bounded protocol revisits a changed old post but unchanged versions cost no model calls',async t=>{
+  const f=fixture(t,1); f.remote.bounded=true;
+  const runtime=f.make(); await f.run(runtime); await f.run(runtime);
+  assert.equal(f.remote.contexts.length,1);
+  assert.equal(f.remote.contexts[0].comments.length,10);
+  assert.equal(f.remote.contexts[0].post.content,undefined);
+  f.remote.posts[0].ageHours=100;
+  f.remote.revision='1:16:0';
+  await f.run(runtime); await f.run(runtime);
+  assert.equal(f.remote.contexts.length,2);
+  assert.equal(f.remote.contexts.at(-1).trigger.kind,'browse');
+  assert.equal(runtime.state.reading_versions['post-1'],'1:16:0');
+  assert.equal(runtime.state.model_calls,2);
+  const resumed=f.make(); await f.run(resumed);
+  assert.equal(f.remote.contexts.length,2);
+  assert.ok(f.remote.calls.some(c=>c.path==='/api/v1/reading/feed'));
+  assert.equal(f.remote.calls.some(c=>c.path.endsWith('/comments') && !c.body),false);
+});
+
+test('bounded protocol extra floors consume a second call and stop at one round',async t=>{
+  const f=fixture(t,1); f.remote.bounded=true; f.remote.extra=true;
+  const runtime=f.make(); assert.equal((await f.run(runtime)).error,null);
+  assert.equal(runtime.state.model_calls,2);
+  assert.equal(f.remote.contexts[0].comments.length,10);
+  assert.equal(f.remote.contexts[1].comments.length,11);
+  assert.equal(f.remote.contexts[1].comments_page.extra_read_limit,0);
+  assert.deepEqual(f.remote.contexts[1].comments_page.returned_floors,[5]);
+  await f.run(runtime); assert.equal(f.remote.contexts.length,2);
+});
+
+test('automatic age defaults to 48h, widening preserves read history, old mentions and waiting reads remain available', async t => {
+  const f=fixture(t,2), runtime=f.make(); f.remote.posts[0].ageHours=72;
+  assert.equal(runtime.optionsStatus().observation_lookback_hours,48);
+  await f.run(runtime); await f.run(runtime);
+  assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2']);
+  assert.ok(f.remote.calls.filter(c=>c.path==='/api/v1/posts').every(c=>c.query.get('lookback_hours')==='48'));
+  const configure=hours=>runtime.configureOptions({expected_actor_id:'reader',expected_base_url:'http://127.0.0.1:4999',
+    expected_revision:runtime.optionsStatus().revision,settings:{observation_lookback_hours:hours}});
+  configure(96); await f.run(runtime); await f.run(runtime);
+  assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2','post-1']);
+  configure(1); f.remote.events=[mention(1)]; await f.run(runtime);
+  assert.deepEqual(f.remote.contexts.map(c=>c.post.id),['post-2','post-1','post-1']);
+  assert.equal(f.remote.contexts.at(-1).trigger.kind,'human_mention');
+  assert.ok(f.remote.calls.filter(c=>c.path==='/api/v1/posts/post-1').every(c=>!c.query.has('lookback_hours')));
+  assert.equal(f.make().optionsStatus().observation_lookback_hours,1);
+  assert.throws(()=>configure(0),/正整数小时/);
+  const g=fixture(t,1), waiting=g.make(); g.remote.posts[0].ageHours=72;
+  waiting.commit({reading_waiting:['post-1']}); await g.run(waiting);
+  assert.deepEqual(g.remote.contexts.map(c=>c.post.id),['post-1']);
+});
+
+test('hot age edit retains in-flight generation and does not reset event progress', async t => {
+  const f=fixture(t,2), runtime=f.make();
+  f.remote.afterModel=()=>runtime.configureOptions({expected_actor_id:'reader',expected_base_url:'http://127.0.0.1:4999',
+    expected_revision:runtime.optionsStatus().revision,settings:{observation_lookback_hours:96}});
+  runtime.commit({cursor:'17'}); await f.run(runtime);
+  assert.equal(runtime.state.cursor,'17');
+  assert.ok(runtime.state.completed.includes('browse:post-1'));
+  assert.equal(f.remote.contexts.length,1);
+  assert.equal(runtime.publicStatus().error,null);
+  assert.equal(runtime.optionsStatus().observation_lookback_hours,96);
+});
 
 test('a nickname change during the same watch reaches the next model without reconnecting or reimporting persona', async t => {
   const f = fixture(t, 2), runtime = f.make();
